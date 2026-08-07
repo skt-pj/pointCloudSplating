@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.hardware.display.DisplayManager;
+import android.media.Image;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
@@ -22,6 +23,7 @@ import com.google.ar.core.Frame;
 import com.google.ar.core.Session;
 import com.google.ar.core.TrackingState;
 import com.google.ar.core.exceptions.CameraNotAvailableException;
+import com.google.ar.core.exceptions.NotYetAvailableException;
 import com.google.ar.core.exceptions.UnavailableApkTooOldException;
 import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException;
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException;
@@ -33,14 +35,18 @@ import java.io.IOException;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
+/**
+ * Minimal Raw Depth point-cloud viewer based on
+ * google-ar/arcore-android-sdk samples/raw_depth_java.
+ */
 public final class MainActivity extends Activity
         implements GLSurfaceView.Renderer, DisplayManager.DisplayListener {
 
     private static final String TAG = "PointCloudRawDepth";
     private static final int CAMERA_PERMISSION_REQUEST = 1001;
 
-    private final BackgroundRenderer backgroundRenderer = new BackgroundRenderer();
     private final PointCloudRenderer pointCloudRenderer = new PointCloudRenderer();
+    private final Object frameInUseLock = new Object();
 
     private GLSurfaceView surfaceView;
     private TextView statusView;
@@ -48,9 +54,11 @@ public final class MainActivity extends Activity
     private DisplayManager displayManager;
     private boolean displayListenerRegistered;
     private boolean installRequested;
+    private boolean depthReceived;
     private volatile boolean displayGeometryChanged = true;
     private volatile int viewportWidth;
     private volatile int viewportHeight;
+    private long depthTimestamp = -1L;
     private String lastStatus = "";
 
     @Override
@@ -60,7 +68,7 @@ public final class MainActivity extends Activity
         surfaceView = new GLSurfaceView(this);
         surfaceView.setPreserveEGLContextOnPause(true);
         surfaceView.setEGLContextClientVersion(2);
-        surfaceView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
+        surfaceView.setEGLConfigChooser(8, 8, 8, 0, 16, 0);
         surfaceView.setRenderer(this);
         surfaceView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
@@ -71,9 +79,12 @@ public final class MainActivity extends Activity
         statusView.setText("Starting ARCore...");
 
         FrameLayout root = new FrameLayout(this);
-        root.addView(surfaceView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
+        root.setBackgroundColor(0xFF1A1A1A);
+        root.addView(
+                surfaceView,
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT));
 
         FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -90,7 +101,7 @@ public final class MainActivity extends Activity
         super.onResume();
 
         if (!hasCameraPermission()) {
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
+            requestPermissions(new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
             return;
         }
 
@@ -98,16 +109,20 @@ public final class MainActivity extends Activity
             return;
         }
 
+        if (!session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
+            setStatus("Raw Depth API is not supported on this device.");
+            session.close();
+            session = null;
+            return;
+        }
+
         try {
-            Config config = session.getConfig();
-            if (!session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
-                setStatus("Raw Depth API is not supported on this device.");
-                return;
+            synchronized (frameInUseLock) {
+                Config config = session.getConfig();
+                config.setDepthMode(Config.DepthMode.RAW_DEPTH_ONLY);
+                session.configure(config);
+                session.resume();
             }
-            config.setDepthMode(Config.DepthMode.RAW_DEPTH_ONLY);
-            config.setFocusMode(Config.FocusMode.AUTO);
-            session.configure(config);
-            session.resume();
         } catch (CameraNotAvailableException e) {
             Log.e(TAG, "Camera is not available", e);
             setStatus("Camera is not available. Restart the app.");
@@ -119,7 +134,7 @@ public final class MainActivity extends Activity
         surfaceView.onResume();
         registerDisplayListener();
         displayGeometryChanged = true;
-        setStatus("Move the device to acquire raw depth points.");
+        setStatus("No depth yet. Move the device.");
     }
 
     private boolean createSession() {
@@ -133,7 +148,8 @@ public final class MainActivity extends Activity
             }
             session = new Session(this);
             return true;
-        } catch (UnavailableArcoreNotInstalledException | UnavailableUserDeclinedInstallationException e) {
+        } catch (UnavailableArcoreNotInstalledException
+                 | UnavailableUserDeclinedInstallationException e) {
             setStatus("Google Play Services for AR is required.");
         } catch (UnavailableApkTooOldException e) {
             setStatus("Update Google Play Services for AR.");
@@ -141,7 +157,8 @@ public final class MainActivity extends Activity
             setStatus("This app's ARCore SDK is too old for the installed service.");
         } catch (UnavailableDeviceNotCompatibleException e) {
             setStatus("This device is not ARCore compatible.");
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
+            Log.e(TAG, "Failed to create ARCore session", e);
             setStatus("Failed to create the ARCore session.");
         }
         return false;
@@ -167,11 +184,15 @@ public final class MainActivity extends Activity
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != CAMERA_PERMISSION_REQUEST) {
             return;
         }
+
         if (hasCameraPermission()) {
             recreate();
         } else {
@@ -182,9 +203,8 @@ public final class MainActivity extends Activity
 
     @Override
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
-        GLES20.glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
+        GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         try {
-            backgroundRenderer.createOnGlThread(this);
             pointCloudRenderer.createOnGlThread(this);
         } catch (IOException e) {
             Log.e(TAG, "Failed to initialize OpenGL resources", e);
@@ -203,35 +223,64 @@ public final class MainActivity extends Activity
     @Override
     public void onDrawFrame(GL10 gl) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
-        if (session == null || backgroundRenderer.getTextureId() < 0) {
+        if (session == null) {
             return;
         }
 
-        try {
-            updateDisplayGeometryIfNeeded();
-            session.setCameraTextureName(backgroundRenderer.getTextureId());
-            Frame frame = session.update();
-            Camera camera = frame.getCamera();
+        synchronized (frameInUseLock) {
+            try {
+                updateDisplayGeometryIfNeeded();
 
-            backgroundRenderer.draw(frame);
+                // Raw Depth sample does not render the camera image, but ARCore still requires
+                // a camera texture name before Session.update().
+                session.setCameraTextureNames(new int[] {0});
 
-            if (camera.getTrackingState() != TrackingState.TRACKING) {
-                setStatus("AR tracking is paused. Move the device slowly.");
-                return;
+                Frame frame = session.update();
+                Camera camera = frame.getCamera();
+
+                if (camera.getTrackingState() != TrackingState.TRACKING) {
+                    if (depthReceived) {
+                        setStatus("AR tracking is paused. Move the device slowly.");
+                    }
+                    return;
+                }
+
+                boolean containsNewDepthData = false;
+                try (Image depthImage = frame.acquireRawDepthImage16Bits()) {
+                    long currentTimestamp = depthImage.getTimestamp();
+                    containsNewDepthData = currentTimestamp != depthTimestamp;
+                    depthTimestamp = currentTimestamp;
+                } catch (NotYetAvailableException e) {
+                    // Normal while Raw Depth is initializing.
+                }
+
+                if (containsNewDepthData) {
+                    DepthData depth = DepthData.create(session, frame);
+                    if (depth != null) {
+                        depthReceived = true;
+                        pointCloudRenderer.update(depth);
+                    }
+                }
+
+                float[] projectionMatrix = new float[16];
+                camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f);
+                float[] viewMatrix = new float[16];
+                camera.getViewMatrix(viewMatrix, 0);
+
+                pointCloudRenderer.draw(viewMatrix, projectionMatrix);
+
+                if (depthReceived) {
+                    setStatus(
+                            "Accumulated raw depth frames: "
+                                    + pointCloudRenderer.getStoredFrameCount());
+                } else {
+                    setStatus("No depth yet. Move the device.");
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "OpenGL/ARCore frame failed", t);
+                setStatus("Frame processing failed. See logcat: "
+                        + t.getClass().getSimpleName());
             }
-
-            DepthPointCloud.PointCloudFrame pointCloud = DepthPointCloud.create(frame, camera.getPose());
-            if (pointCloud == null) {
-                setStatus("Waiting for raw depth data. Move the device.");
-                return;
-            }
-
-            pointCloudRenderer.update(pointCloud.points);
-            pointCloudRenderer.draw(camera);
-            setStatus("Raw depth point cloud: " + pointCloud.pointCount + " points");
-        } catch (Throwable t) {
-            Log.e(TAG, "OpenGL/ARCore frame failed", t);
-            setStatus("Frame processing failed. See logcat: " + t.getClass().getSimpleName());
         }
     }
 
@@ -239,6 +288,7 @@ public final class MainActivity extends Activity
         if (!displayGeometryChanged || viewportWidth == 0 || viewportHeight == 0) {
             return;
         }
+
         int rotation = Surface.ROTATION_0;
         if (getWindowManager().getDefaultDisplay() != null) {
             rotation = getWindowManager().getDefaultDisplay().getRotation();
@@ -248,7 +298,8 @@ public final class MainActivity extends Activity
     }
 
     private boolean hasCameraPermission() {
-        return checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        return checkSelfPermission(Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED;
     }
 
     private void registerDisplayListener() {
