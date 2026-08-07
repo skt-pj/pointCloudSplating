@@ -46,34 +46,35 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Coordinates occasional high-resolution Camera2 JPEG captures with ARCore poses.
+ * Stores photogrammetry texture frames and matches each Camera2 JPEG sensor timestamp to the
+ * nearest ARCore camera pose.
  *
- * <p>JPEG sensor timestamps are matched to the closest tracked ARCore frame. For Pixel 10a the
- * quality gate prioritizes short exposure and very low device motion, which is more useful for
- * photogrammetry than saving every frame and later accepting motion blur.
+ * <p>ARCore is used for tracking/depth/pose. Image quality decisions are made for downstream
+ * SfM/MVS/3DGS: sufficient viewpoint change, low phone motion, stable focus, short still exposure,
+ * bounded ISO, and disabled image stabilization.
  */
 public final class HighResPhotoCaptureManager {
     private static final String TAG = "HighResPhotoCapture";
 
-    // Google's SharedCamera guide uses ~12 MP as a representative occasional high-resolution JPEG
-    // stream alongside ARCore. Staying near this size is a better simultaneous-stream target than
-    // requesting the Pixel 10a sensor's full 50 MP output.
+    // SharedCamera is much more reliable with a binned ~12 MP JPEG stream than with full 48 MP.
     private static final long MAX_JPEG_PIXELS = 13_000_000L;
 
     private static final long MIN_CAPTURE_INTERVAL_NS = 650_000_000L;
-    private static final long FORCE_CAPTURE_AFTER_NS = 2_500_000_000L;
+    private static final long FORCE_CAPTURE_AFTER_NS = 3_000_000_000L;
     private static final float MIN_VIEW_TRANSLATION_METERS = 0.035f;
     private static final float MIN_VIEW_ROTATION_DEGREES = 3.0f;
-    private static final long MAX_POSE_MATCH_DELTA_NS = 100_000_000L;
+    private static final long MAX_POSE_MATCH_DELTA_NS = 50_000_000L;
     private static final int MAX_POSE_SAMPLES = 120;
+
+    // Photogrammetry quality limits. MainActivity targets 1/500 s; 1/300 s is the hard save limit.
+    private static final long MAX_STILL_EXPOSURE_NS = 3_333_333L;
+    private static final int MAX_STILL_ISO = 1600;
 
     private final File captureRoot;
     private final ExecutorService writer = Executors.newSingleThreadExecutor();
     private final AtomicInteger captureSequence = new AtomicInteger();
 
     private final boolean pixel10a;
-    private final long preferredExposureNs;
-    private final long acceptedStillExposureNs;
     private final float maxLinearSpeedMps;
     private final float maxAngularSpeedDps;
 
@@ -99,13 +100,10 @@ public final class HighResPhotoCaptureManager {
         String model = Build.MODEL == null ? "" : Build.MODEL.toLowerCase(Locale.US);
         pixel10a = model.contains("pixel 10a");
         if (pixel10a) {
-            preferredExposureNs = 10_000_000L;       // ~1/100 s.
-            acceptedStillExposureNs = 12_500_000L;   // Tolerate ~1/80 s on the actual JPEG frame.
+            // Pose gating is intentionally strict even though the still shutter is fast.
             maxLinearSpeedMps = 0.08f;
             maxAngularSpeedDps = 6.0f;
         } else {
-            preferredExposureNs = 12_500_000L;
-            acceptedStillExposureNs = 16_666_667L;
             maxLinearSpeedMps = 0.10f;
             maxAngularSpeedDps = 8.0f;
         }
@@ -122,7 +120,7 @@ public final class HighResPhotoCaptureManager {
         return context.getExternalFilesDir(Environment.DIRECTORY_PICTURES);
     }
 
-    /** Chooses the largest ~4:3 JPEG output at or below about 13 MP. */
+    /** Chooses the largest roughly 4:3 JPEG output at or below 13 MP. */
     public static Size chooseJpegSize(CameraCharacteristics characteristics) {
         StreamConfigurationMap map =
                 characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
@@ -148,9 +146,6 @@ public final class HighResPhotoCaptureManager {
                 return size;
             }
         }
-
-        // If a device exposes only unusually large JPEG modes, choose the smallest to reduce the
-        // risk of exceeding the simultaneous-stream budget with ARCore.
         return sorted.get(sorted.size() - 1);
     }
 
@@ -170,15 +165,12 @@ public final class HighResPhotoCaptureManager {
     }
 
     public String getProfileName() {
-        return pixel10a ? "Pixel 10a" : "generic";
-    }
-
-    public Size getJpegSize() {
-        return jpegSize;
+        return pixel10a ? "Pixel 10a photogrammetry" : "photogrammetry";
     }
 
     /**
-     * Records the latest ARCore pose and returns true when a high-resolution JPEG should be fired.
+     * Records the current ARCore pose and returns true when the viewpoint and motion are suitable
+     * for requesting a high-resolution Camera2 still.
      */
     public synchronized boolean onArFrame(Frame frame, Camera camera) {
         long timestampNs = frame.getTimestamp();
@@ -207,7 +199,7 @@ public final class HighResPhotoCaptureManager {
         }
 
         ArFrameMetadata metadata = readArFrameMetadata(frame);
-        if (!isArFrameSharpEnough(metadata, motion)) {
+        if (!isPoseAndFocusStable(metadata, motion)) {
             return false;
         }
 
@@ -217,12 +209,10 @@ public final class HighResPhotoCaptureManager {
         return true;
     }
 
-    /** Called when Camera2 could not submit a requested still. */
     public synchronized void onCaptureRequestFailed() {
         captureInFlight = false;
     }
 
-    /** Receives metadata for the high-resolution Camera2 capture. */
     public synchronized void onCaptureCompleted(TotalCaptureResult result) {
         Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
         if (timestamp == null) {
@@ -234,7 +224,6 @@ public final class HighResPhotoCaptureManager {
         tryFinalizePendingLocked();
     }
 
-    /** Receives the encoded JPEG produced by the custom SharedCamera surface. */
     public void onJpegAvailable(ImageReader reader) {
         Image image = null;
         try {
@@ -291,12 +280,9 @@ public final class HighResPhotoCaptureManager {
                 || rotationDegrees(lastRequestedPose, pose) >= MIN_VIEW_ROTATION_DEGREES;
     }
 
-    private boolean isArFrameSharpEnough(ArFrameMetadata metadata, Motion motion) {
+    private boolean isPoseAndFocusStable(ArFrameMetadata metadata, Motion motion) {
         if (motion.linearSpeedMps > maxLinearSpeedMps
                 || motion.angularSpeedDps > maxAngularSpeedDps) {
-            return false;
-        }
-        if (metadata.exposureTimeNs != null && metadata.exposureTimeNs > preferredExposureNs) {
             return false;
         }
         if (metadata.lensState != null && metadata.lensState != 0) {
@@ -305,13 +291,25 @@ public final class HighResPhotoCaptureManager {
         return isFocusedState(metadata.afState);
     }
 
-    private boolean isStillSharpEnough(StillMetadata metadata) {
-        if (metadata.exposureTimeNs != null
-                && metadata.exposureTimeNs > acceptedStillExposureNs) {
+    private static boolean isStillSharpEnough(StillMetadata metadata) {
+        if (metadata.exposureTimeNs == null
+                || metadata.exposureTimeNs > MAX_STILL_EXPOSURE_NS) {
+            return false;
+        }
+        if (metadata.iso == null || metadata.iso > MAX_STILL_ISO) {
             return false;
         }
         if (metadata.lensState != null
                 && metadata.lensState != CaptureResult.LENS_STATE_STATIONARY) {
+            return false;
+        }
+        if (metadata.oisMode != null
+                && metadata.oisMode != CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_OFF) {
+            return false;
+        }
+        if (metadata.videoStabilizationMode != null
+                && metadata.videoStabilizationMode
+                != CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF) {
             return false;
         }
         return isFocusedState(metadata.afState);
@@ -330,8 +328,6 @@ public final class HighResPhotoCaptureManager {
         ArFrameMetadata out = new ArFrameMetadata();
         try {
             ImageMetadata metadata = frame.getImageMetadata();
-            out.exposureTimeNs = getLong(metadata, ImageMetadata.SENSOR_EXPOSURE_TIME);
-            out.iso = getInt(metadata, ImageMetadata.SENSOR_SENSITIVITY);
             Byte lens = getByte(metadata, ImageMetadata.LENS_STATE);
             out.lensState = lens == null ? null : lens & 0xff;
             Byte af = getByte(metadata, ImageMetadata.CONTROL_AF_STATE);
@@ -355,9 +351,6 @@ public final class HighResPhotoCaptureManager {
             if (metadata == null) {
                 continue;
             }
-
-            // If ARCore has not yet reached this sensor timestamp, keep the JPEG pending for the
-            // next render frame rather than associating it with an older pose prematurely.
             if (newestPoseTimestamp < imageTimestamp) {
                 continue;
             }
@@ -365,14 +358,15 @@ public final class HighResPhotoCaptureManager {
             iterator.remove();
             stillMetadata.remove(imageTimestamp);
             if (!isStillSharpEnough(metadata)) {
-                Log.d(TAG, "Discarding blurred high-res frame timestamp=" + imageTimestamp);
+                Log.d(TAG, "Discarding still that failed photogrammetry quality gate: "
+                        + imageTimestamp);
                 continue;
             }
 
             PoseSample pose = findNearestPoseLocked(imageTimestamp);
             if (pose == null
                     || Math.abs(pose.timestampNs - imageTimestamp) > MAX_POSE_MATCH_DELTA_NS) {
-                Log.w(TAG, "Discarding JPEG without close ARCore pose timestamp=" + imageTimestamp);
+                Log.w(TAG, "Discarding JPEG without close ARCore pose: " + imageTimestamp);
                 continue;
             }
 
@@ -383,7 +377,7 @@ public final class HighResPhotoCaptureManager {
                 try {
                     writeCapture(index, jpeg, pose, metadata);
                 } catch (IOException | JSONException e) {
-                    Log.e(TAG, "Failed to write high-resolution texture frame", e);
+                    Log.e(TAG, "Failed to write photogrammetry frame", e);
                 }
             });
         }
@@ -453,11 +447,13 @@ public final class HighResPhotoCaptureManager {
         json.put("camera2_capture", camera);
 
         JSONObject quality = new JSONObject();
-        quality.put("profile", pixel10a ? "pixel_10a" : "generic");
-        quality.put("preferred_exposure_ns", preferredExposureNs);
-        quality.put("accepted_still_exposure_ns", acceptedStillExposureNs);
+        quality.put("profile", pixel10a ? "pixel_10a_photogrammetry" : "photogrammetry");
+        quality.put("target_shutter", "1/500 s");
+        quality.put("max_saved_exposure_ns", MAX_STILL_EXPOSURE_NS);
+        quality.put("max_saved_iso", MAX_STILL_ISO);
         quality.put("max_linear_speed_mps", maxLinearSpeedMps);
         quality.put("max_angular_speed_dps", maxAngularSpeedDps);
+        quality.put("max_pose_match_delta_ns", MAX_POSE_MATCH_DELTA_NS);
         json.put("capture_quality_gate", quality);
 
         try (FileOutputStream out = new FileOutputStream(jsonFile)) {
@@ -473,7 +469,7 @@ public final class HighResPhotoCaptureManager {
             json.put("model", Build.MODEL);
             json.put("device", Build.DEVICE);
             json.put("sdk_int", Build.VERSION.SDK_INT);
-            json.put("profile", pixel10a ? "pixel_10a" : "generic");
+            json.put("profile", pixel10a ? "pixel_10a_photogrammetry" : "photogrammetry");
             json.put("camera_id", cameraId);
             if (jpegSize != null) {
                 json.put("jpeg_width", jpegSize.getWidth());
@@ -497,11 +493,12 @@ public final class HighResPhotoCaptureManager {
                 putFloatArray(json, "lens_distortion",
                         c.get(CameraCharacteristics.LENS_DISTORTION));
             }
+            json.put("capture_policy",
+                    "Camera2 still: target 1/500 s, never save slower than 1/300 s, ISO <= 1600");
             json.put("focus_policy",
-                    "continuous ARCore AUTO focus; capture only focused/stationary lens frames");
-            json.put("eis_policy", "OFF to preserve stable photogrammetry geometry");
-            json.put("aperture_policy",
-                    "physical aperture is not changed; record the actual f-number per frame");
+                    "ARCore/Camera2 autofocus for acquisition; lock measured focus distance for still");
+            json.put("stabilization_policy", "EIS OFF and OIS OFF for saved stills");
+            json.put("aperture_policy", "do not change physical aperture; record actual f-number");
 
             try (FileOutputStream out =
                          new FileOutputStream(new File(captureRoot, "session_camera.json"))) {
@@ -536,22 +533,6 @@ public final class HighResPhotoCaptureManager {
         float[] q = relative.getRotationQuaternion();
         float w = Math.max(-1f, Math.min(1f, Math.abs(q[3])));
         return (float) Math.toDegrees(2.0 * Math.acos(w));
-    }
-
-    private static Long getLong(ImageMetadata metadata, int key) {
-        try {
-            return metadata.getLong(key);
-        } catch (MetadataNotFoundException | IllegalArgumentException e) {
-            return null;
-        }
-    }
-
-    private static Integer getInt(ImageMetadata metadata, int key) {
-        try {
-            return metadata.getInt(key);
-        } catch (MetadataNotFoundException | IllegalArgumentException e) {
-            return null;
-        }
     }
 
     private static Byte getByte(ImageMetadata metadata, int key) {
@@ -625,8 +606,6 @@ public final class HighResPhotoCaptureManager {
     }
 
     private static final class ArFrameMetadata {
-        Long exposureTimeNs;
-        Integer iso;
         Integer lensState;
         Integer afState;
     }
