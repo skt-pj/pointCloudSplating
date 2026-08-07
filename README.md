@@ -1,13 +1,15 @@
 # pointCloudSplating
 
-Minimal Android app that extracts the Raw Depth point-cloud acquisition path from Google's `codelab-raw-depth-api` sample.
+Minimal Android app based on Google's current `arcore-android-sdk` Raw Depth Java sample.
 
-Included only:
-- ARCore camera preview
-- Raw Depth (`acquireRawDepthImage16Bits`)
+Included:
+- ARCore Raw Depth (`acquireRawDepthImage16Bits`)
 - Raw Depth confidence (`acquireRawDepthConfidenceImage`)
-- Depth pixel to world-space XYZ conversion
-- OpenGL point-cloud rendering
+- Depth pixel to camera-local XYZ conversion
+- RGB color sampling from the camera image
+- Anchor-based placement of each depth frame
+- Accumulation of up to 60 Raw Depth frames
+- OpenGL RGB point-cloud rendering
 
 Not included:
 - plane filtering
@@ -18,7 +20,7 @@ Not included:
 ## Requirements
 
 - ARCore-compatible Android device
-- ARCore Depth API support
+- ARCore Raw Depth API support
 - Google Play Services for AR
 - Android 7.0 (API 24) or newer
 
@@ -28,7 +30,7 @@ The repository includes a GitHub Actions workflow that builds `app-debug.apk` an
 
 ## Source
 
-The point-cloud conversion and rendering are derived from:
-`google-ar/codelab-raw-depth-api` (Apache License 2.0).
+The Raw Depth conversion and rendering are adapted from:
+`google-ar/arcore-android-sdk/samples/raw_depth_java` (Apache License 2.0).
 
 ARCore dependency: `com.google.ar:core:1.54.0`.
