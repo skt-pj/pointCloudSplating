@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * intrinsics and per-frame Camera2 metadata exposed by ARCore.
  *
  * <p>The capture gate favors sharp frames: short exposure, low device motion, stationary lens and
- * a focused AF state. Pixel 10a uses a stricter hand-held profile tuned for its f/1.7 OIS main
+ * a focused AF state. Pixel 10a uses a stricter hand-held profile tuned for its f/1.68 OIS main
  * camera. Images are written on a background thread so point-cloud acquisition is not blocked by
  * JPEG compression and file I/O.
  */
@@ -77,7 +77,7 @@ public final class PhotoCaptureManager {
         pixel10a = model.contains("pixel 10a");
 
         if (pixel10a) {
-            // Pixel 10a main camera is f/1.7 with OIS. Prefer 1/100 s or faster and very low phone
+            // Pixel 10a main camera is f/1.68 with OIS. Prefer 1/100 s or faster and very low phone
             // motion to keep natural image detail for feature matching rather than relying on EIS.
             maxExposureNs = 10_000_000L;
             maxLinearSpeedMps = 0.08f;
@@ -473,7 +473,7 @@ public final class PhotoCaptureManager {
         }
     }
 
-    private static JSONArray array(float[] values) {
+    private static JSONArray array(float[] values) throws JSONException {
         JSONArray array = new JSONArray();
         for (float value : values) {
             array.put(value);
@@ -481,7 +481,7 @@ public final class PhotoCaptureManager {
         return array;
     }
 
-    private static JSONArray array(int[] values) {
+    private static JSONArray array(int[] values) throws JSONException {
         JSONArray array = new JSONArray();
         for (int value : values) {
             array.put(value);
