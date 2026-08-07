@@ -39,10 +39,11 @@ jobs:
       - name: Restore stable development signing key
         run: base64 --decode ci/pointcloud-dev.jks.b64 > ci/pointcloud-dev.jks
 
-      - name: Read app version
+      - name: Apply app version
         run: |
-          VERSION_NAME=$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle)
-          VERSION_CODE=$(sed -n 's/.*versionCode \([0-9][0-9]*\).*/\1/p' app/build.gradle)
+          source version.properties
+          sed -i -E "s/versionCode [0-9]+/versionCode ${VERSION_CODE}/" app/build.gradle
+          sed -i -E "s/versionName '[^']+'/versionName '${VERSION_NAME}'/" app/build.gradle
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
