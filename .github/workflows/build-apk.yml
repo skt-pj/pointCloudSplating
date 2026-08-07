@@ -30,24 +30,36 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Restore stable development signing key
+        run: base64 --decode ci/pointcloud-dev.jks.b64 > ci/pointcloud-dev.jks
+
+      - name: Read app version
+        run: |
+          VERSION_NAME=$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle)
+          VERSION_CODE=$(sed -n 's/.*versionCode \([0-9][0-9]*\).*/\1/p' app/build.gradle)
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Upload APK artifact
+      - name: Upload versioned APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pointCloudSplating-debug
+          name: pointCloudSplating-v${{ env.VERSION_NAME }}-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Publish latest APK into repository
+      - name: Publish latest and versioned APK into repository
         run: |
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk dist/pointCloudSplating-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/pointCloudSplating-v${VERSION_NAME}-debug.apk"
+          printf 'versionName=%s\nversionCode=%s\n' "$VERSION_NAME" "$VERSION_CODE" > dist/version.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add dist/pointCloudSplating-debug.apk
+          git add dist/pointCloudSplating-debug.apk "dist/pointCloudSplating-v${VERSION_NAME}-debug.apk" dist/version.txt
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "build debug apk"
+          git commit -m "build v${VERSION_NAME} debug apk"
           git push
