@@ -2,6 +2,8 @@ package com.sktpj.pointcloudsplatting;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
@@ -17,18 +19,19 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.display.DisplayManager;
 import android.media.Image;
 import android.media.ImageReader;
-import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.util.Log;
 import android.util.Range;
 import android.util.Size;
 import android.view.Gravity;
 import android.view.Surface;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -48,27 +51,23 @@ import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException;
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-/**
- * Raw Depth scanner with Camera2 SharedCamera texture acquisition for photogrammetry / 3DGS.
- *
- * <p>ARCore is responsible for tracking, pose and Raw Depth. Camera2 is responsible for the
- * reconstruction images. Texture stills use a short manual exposure and the most recently focused
- * lens distance so that capture quality is determined by SfM/MVS needs rather than AR rendering.
- */
+/** Raw Depth scanner + Camera2 SharedCamera texture capture for photogrammetry / 3DGS. */
 public final class MainActivity extends Activity
         implements GLSurfaceView.Renderer, DisplayManager.DisplayListener {
 
     private static final String TAG = "PointCloudRawDepth";
     private static final int CAMERA_PERMISSION_REQUEST = 1001;
+    private static final int MENU_COPY_LOG = 1;
     private static final String HIGH_RES_CAPTURE_TAG = "pointcloud_high_res_texture";
 
     // Pixel 10a photogrammetry policy.
@@ -77,10 +76,12 @@ public final class MainActivity extends Activity
     private static final int MAX_PHOTOGRAMMETRY_ISO = 1600;
 
     private final PointCloudRenderer pointCloudRenderer = new PointCloudRenderer();
+    private final CameraBackgroundRenderer cameraBackgroundRenderer = new CameraBackgroundRenderer();
     private final Object frameInUseLock = new Object();
 
     private GLSurfaceView surfaceView;
     private TextView statusView;
+    private Button menuButton;
     private DisplayManager displayManager;
 
     private Session session;
@@ -98,7 +99,6 @@ public final class MainActivity extends Activity
 
     private String cameraId;
     private Size jpegSize;
-    private int cameraTextureId = -1;
 
     private boolean installRequested;
     private boolean activityResumed;
@@ -116,8 +116,7 @@ public final class MainActivity extends Activity
     private String lastStatus = "";
     private String cameraConfigSummary = "camera=?";
 
-    // Latest Camera2/ARCore repeating-result state. Used to preserve scene brightness and lock focus
-    // for the one-shot reconstruction image.
+    // Latest ARCore/Camera2 repeating metadata used to create one fast, focus-locked still.
     private volatile Long latestExposureTimeNs;
     private volatile Integer latestIso;
     private volatile Float latestFocusDistanceDiopters;
@@ -128,7 +127,7 @@ public final class MainActivity extends Activity
             new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(CameraDevice device) {
-                    Log.i(TAG, "Shared camera opened: " + device.getId());
+                    DiagnosticLog.i(TAG, "Shared camera opened id=" + device.getId());
                     cameraOpening = false;
                     cameraDevice = device;
                     createCameraCaptureSession();
@@ -136,24 +135,30 @@ public final class MainActivity extends Activity
 
                 @Override
                 public void onDisconnected(CameraDevice device) {
-                    Log.w(TAG, "Shared camera disconnected");
+                    DiagnosticLog.w(TAG, "Shared camera disconnected id=" + device.getId());
                     device.close();
                     cameraDevice = null;
                     cameraOpening = false;
-                    setStatus("Camera disconnected.");
+                    setStatus("Camera disconnected. メニュー → ログをコピー");
                 }
 
                 @Override
                 public void onError(CameraDevice device, int error) {
-                    Log.e(TAG, "Shared camera error=" + error);
+                    String errorName = cameraErrorName(error);
+                    DiagnosticLog.e(TAG,
+                            "Shared camera fatal error=" + error + " (" + errorName + ")"
+                                    + " config=" + cameraConfigSummary);
                     device.close();
                     cameraDevice = null;
                     cameraOpening = false;
-                    setStatus("Camera2/SharedCamera error: " + error);
+                    setStatus(
+                            "Camera2/SharedCamera error: " + error + " (" + errorName + ")\n"
+                                    + "メニュー → ログをコピー");
                 }
 
                 @Override
                 public void onClosed(CameraDevice device) {
+                    DiagnosticLog.i(TAG, "Shared camera closed id=" + device.getId());
                     if (cameraDevice == device) {
                         cameraDevice = null;
                     }
@@ -165,33 +170,47 @@ public final class MainActivity extends Activity
             new CameraCaptureSession.StateCallback() {
                 @Override
                 public void onConfigured(CameraCaptureSession configuredSession) {
+                    DiagnosticLog.i(TAG, "Camera capture session configured");
                     captureSession = configuredSession;
                     try {
+                        // Match Google's SharedCamera startup sequence: start a Camera2 repeating
+                        // request first, then resume ARCore from onActive(). The repeating request
+                        // targets only ARCore's surfaces. The JPEG surface is intentionally one-shot
+                        // and is not registered as an ARCore repeating app surface.
                         captureSession.setRepeatingRequest(
                                 previewCaptureRequestBuilder.build(),
                                 cameraCaptureCallback,
                                 cameraHandler);
                     } catch (CameraAccessException | IllegalStateException e) {
-                        Log.e(TAG, "Failed to start SharedCamera repeating request", e);
-                        setStatus("Failed to start shared camera stream.");
+                        DiagnosticLog.e(TAG, "Failed to start SharedCamera repeating request", e);
+                        setStatus("Failed to start shared camera stream.\nメニュー → ログをコピー");
                     }
                 }
 
                 @Override
                 public void onActive(CameraCaptureSession activeSession) {
+                    DiagnosticLog.i(TAG, "Camera capture session active");
                     if (activityResumed && !arcoreActive) {
                         resumeArCore();
                     }
                 }
 
                 @Override
+                public void onReady(CameraCaptureSession readySession) {
+                    DiagnosticLog.i(TAG, "Camera capture session ready");
+                }
+
+                @Override
                 public void onConfigureFailed(CameraCaptureSession failedSession) {
-                    Log.e(TAG, "SharedCamera capture session configuration failed");
-                    setStatus("High-resolution texture stream could not be configured with ARCore.");
+                    DiagnosticLog.e(TAG,
+                            "SharedCamera capture session configuration failed: "
+                                    + cameraConfigSummary);
+                    setStatus("Camera stream configuration failed.\nメニュー → ログをコピー");
                 }
 
                 @Override
                 public void onClosed(CameraCaptureSession closedSession) {
+                    DiagnosticLog.i(TAG, "Camera capture session closed");
                     if (captureSession == closedSession) {
                         captureSession = null;
                     }
@@ -217,9 +236,11 @@ public final class MainActivity extends Activity
                         CameraCaptureSession captureSession,
                         CaptureRequest request,
                         CaptureFailure failure) {
+                    DiagnosticLog.w(TAG,
+                            "Camera capture failed reason=" + failure.getReason()
+                                    + " frame=" + failure.getFrameNumber());
                     if (HIGH_RES_CAPTURE_TAG.equals(request.getTag())
                             && photoCaptureManager != null) {
-                        Log.w(TAG, "High-res JPEG capture failed: " + failure.getReason());
                         photoCaptureManager.onCaptureRequestFailed();
                     }
                 }
@@ -228,6 +249,9 @@ public final class MainActivity extends Activity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        DiagnosticLog.i(TAG,
+                "App create model=" + Build.MANUFACTURER + " " + Build.MODEL
+                        + " sdk=" + Build.VERSION.SDK_INT);
 
         surfaceView = new GLSurfaceView(this);
         surfaceView.setPreserveEGLContextOnPause(true);
@@ -238,9 +262,19 @@ public final class MainActivity extends Activity
 
         statusView = new TextView(this);
         statusView.setTextColor(0xFFFFFFFF);
-        statusView.setBackgroundColor(0x66000000);
-        statusView.setPadding(24, 16, 24, 16);
+        statusView.setBackgroundColor(0x77000000);
+        statusView.setPadding(dp(12), dp(8), dp(12), dp(8));
         statusView.setText("Starting ARCore SharedCamera...");
+
+        menuButton = new Button(this);
+        menuButton.setText("⋮");
+        menuButton.setTextSize(24f);
+        menuButton.setTextColor(0xFFFFFFFF);
+        menuButton.setBackgroundColor(0x77000000);
+        menuButton.setMinWidth(0);
+        menuButton.setMinHeight(0);
+        menuButton.setPadding(0, 0, 0, 0);
+        menuButton.setOnClickListener(v -> showMenu());
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF1A1A1A);
@@ -254,7 +288,15 @@ public final class MainActivity extends Activity
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT);
         statusParams.gravity = Gravity.TOP | Gravity.START;
+        statusParams.leftMargin = dp(8);
+        statusParams.topMargin = dp(8);
         root.addView(statusView, statusParams);
+
+        FrameLayout.LayoutParams menuParams = new FrameLayout.LayoutParams(dp(48), dp(48));
+        menuParams.gravity = Gravity.TOP | Gravity.END;
+        menuParams.topMargin = dp(6);
+        menuParams.rightMargin = dp(6);
+        root.addView(menuButton, menuParams);
         setContentView(root);
 
         displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -264,15 +306,92 @@ public final class MainActivity extends Activity
         try {
             photoCaptureManager = new HighResPhotoCaptureManager(
                     HighResPhotoCaptureManager.getPicturesDirectory(this));
-            Log.i(TAG, "Texture captures: " + photoCaptureManager.getCaptureDirectoryPath());
+            DiagnosticLog.i(TAG,
+                    "Texture capture directory=" + photoCaptureManager.getCaptureDirectoryPath());
         } catch (RuntimeException e) {
-            Log.e(TAG, "Failed to initialize texture capture directory", e);
+            DiagnosticLog.e(TAG, "Failed to initialize texture capture directory", e);
         }
+    }
+
+    private void showMenu() {
+        PopupMenu popup = new PopupMenu(this, menuButton);
+        popup.getMenu().add(0, MENU_COPY_LOG, 0, "ログをコピー");
+        popup.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == MENU_COPY_LOG) {
+                copyLogsToClipboard();
+                return true;
+            }
+            return false;
+        });
+        popup.show();
+    }
+
+    private void copyLogsToClipboard() {
+        Toast.makeText(this, "ログを収集中…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            String report = buildDiagnosticReport();
+            runOnUiThread(() -> {
+                ClipboardManager clipboard =
+                        (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                clipboard.setPrimaryClip(ClipData.newPlainText("pointCloudSplating log", report));
+                Toast.makeText(this, "ログをコピーしました", Toast.LENGTH_SHORT).show();
+            });
+        }, "CopyDiagnostics").start();
+    }
+
+    private String buildDiagnosticReport() {
+        StringBuilder report = new StringBuilder();
+        report.append("pointCloudSplating diagnostics\n")
+                .append("manufacturer=").append(Build.MANUFACTURER).append('\n')
+                .append("model=").append(Build.MODEL).append('\n')
+                .append("device=").append(Build.DEVICE).append('\n')
+                .append("sdk=").append(Build.VERSION.SDK_INT).append('\n')
+                .append("cameraId=").append(cameraId).append('\n')
+                .append("cameraConfig=").append(cameraConfigSummary).append('\n')
+                .append("arcoreActive=").append(arcoreActive).append('\n')
+                .append("surfaceCreated=").append(surfaceCreated).append('\n')
+                .append("manualSensorSupported=").append(manualSensorSupported).append('\n')
+                .append("status=").append(lastStatus).append("\n\n")
+                .append("=== in-app log ===\n")
+                .append(DiagnosticLog.snapshot())
+                .append("\n=== process logcat ===\n")
+                .append(readOwnLogcat());
+        return report.toString();
+    }
+
+    private static String readOwnLogcat() {
+        StringBuilder out = new StringBuilder();
+        java.lang.Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(
+                    new String[] {
+                            "logcat", "-d", "-v", "threadtime", "--pid=" + android.os.Process.myPid()
+                    });
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    out.append(line).append('\n');
+                    if (out.length() > 200_000) {
+                        out.append("[logcat truncated]\n");
+                        break;
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            out.append("logcat unavailable: ").append(e).append('\n');
+        } finally {
+            if (process != null) {
+                process.destroy();
+            }
+        }
+        return out.toString();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        DiagnosticLog.i(TAG, "onResume");
         activityResumed = true;
 
         if (!hasCameraPermission()) {
@@ -291,7 +410,7 @@ public final class MainActivity extends Activity
         if (surfaceCreated) {
             openCameraForSharing();
         }
-        setStatus("Starting Pixel 10a photogrammetry capture / Raw Depth...");
+        setStatus("Starting Pixel 10a SharedCamera / Raw Depth...");
     }
 
     private boolean createSharedArSession() {
@@ -305,10 +424,11 @@ public final class MainActivity extends Activity
             }
 
             session = new Session(this, EnumSet.of(Session.Feature.SHARED_CAMERA));
-            CameraConfig cameraConfig = CameraConfigSelector.selectHighestResolution30Fps(session);
+            CameraConfig cameraConfig = CameraConfigSelector.selectPhotogrammetry30Fps(session);
             session.setCameraConfig(cameraConfig);
 
             if (!session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
+                DiagnosticLog.e(TAG, "RAW_DEPTH_ONLY unsupported with selected SharedCamera config");
                 setStatus("Raw Depth is not available with this SharedCamera config.");
                 session.close();
                 session = null;
@@ -337,9 +457,10 @@ public final class MainActivity extends Activity
                 photoCaptureManager.configureCamera(cameraId, jpegSize, cameraCharacteristics);
             }
 
-            sharedCamera.setAppSurfaces(
-                    cameraId, Collections.singletonList(jpegReader.getSurface()));
-
+            // Do NOT call SharedCamera.setAppSurfaces() for the high-resolution JPEG. That API is
+            // intended for surfaces ARCore must include in its repeating request. Our JPEG is an
+            // occasional one-shot Camera2 target. Registering a ~12 MP JPEG as an ARCore repeating
+            // app surface increases stream pressure and was part of the Pixel 10a error-4 startup.
             Size cpu = session.getCameraConfig().getImageSize();
             Size gpu = session.getCameraConfig().getTextureSize();
             cameraConfigSummary =
@@ -347,22 +468,28 @@ public final class MainActivity extends Activity
                             + " / GPU " + gpu.getWidth() + "x" + gpu.getHeight()
                             + " / JPEG " + jpegSize.getWidth() + "x" + jpegSize.getHeight()
                             + " / manual=" + manualSensorSupported;
-            Log.i(TAG, cameraConfigSummary
-                    + " cameraId=" + cameraId
-                    + " depthSensorUsage=" + session.getCameraConfig().getDepthSensorUsage());
+            DiagnosticLog.i(TAG,
+                    "SharedCamera configured " + cameraConfigSummary
+                            + " cameraId=" + cameraId
+                            + " depthSensorUsage=" + session.getCameraConfig().getDepthSensorUsage());
             return true;
         } catch (UnavailableArcoreNotInstalledException
                  | UnavailableUserDeclinedInstallationException e) {
+            DiagnosticLog.e(TAG, "ARCore is required", e);
             setStatus("Google Play Services for AR is required.");
         } catch (UnavailableApkTooOldException e) {
+            DiagnosticLog.e(TAG, "ARCore APK too old", e);
             setStatus("Update Google Play Services for AR.");
         } catch (UnavailableSdkTooOldException e) {
+            DiagnosticLog.e(TAG, "App ARCore SDK too old", e);
             setStatus("Update this app / ARCore SDK.");
         } catch (UnavailableDeviceNotCompatibleException e) {
+            DiagnosticLog.e(TAG, "Device is not ARCore compatible", e);
             setStatus("This device is not ARCore compatible.");
         } catch (CameraAccessException | RuntimeException e) {
-            Log.e(TAG, "Failed to create SharedCamera ARCore session", e);
-            setStatus("Failed to configure SharedCamera: " + e.getClass().getSimpleName());
+            DiagnosticLog.e(TAG, "Failed to configure SharedCamera", e);
+            setStatus("Failed to configure SharedCamera: " + e.getClass().getSimpleName()
+                    + "\nメニュー → ログをコピー");
         }
 
         if (session != null) {
@@ -385,15 +512,17 @@ public final class MainActivity extends Activity
         }
 
         try {
-            session.setCameraTextureName(cameraTextureId);
+            int textureId = cameraBackgroundRenderer.getTextureId();
+            session.setCameraTextureName(textureId);
             CameraDevice.StateCallback wrapped =
                     sharedCamera.createARDeviceStateCallback(cameraDeviceCallback, cameraHandler);
             cameraOpening = true;
+            DiagnosticLog.i(TAG, "Opening SharedCamera id=" + cameraId + " texture=" + textureId);
             cameraManager.openCamera(cameraId, wrapped, cameraHandler);
         } catch (CameraAccessException | SecurityException | IllegalArgumentException e) {
             cameraOpening = false;
-            Log.e(TAG, "Failed to open ARCore shared camera", e);
-            setStatus("Failed to open SharedCamera.");
+            DiagnosticLog.e(TAG, "Failed to open ARCore shared camera", e);
+            setStatus("Failed to open SharedCamera.\nメニュー → ログをコピー");
         }
     }
 
@@ -416,13 +545,18 @@ public final class MainActivity extends Activity
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
 
+            DiagnosticLog.i(TAG,
+                    "Creating capture session arCoreSurfaces=" + arCoreSurfaces.size()
+                            + " totalSurfaces=" + sessionSurfaces.size()
+                            + " JPEG=" + jpegSize);
+
             CameraCaptureSession.StateCallback wrapped =
                     sharedCamera.createARSessionStateCallback(
                             cameraSessionStateCallback, cameraHandler);
             cameraDevice.createCaptureSession(sessionSurfaces, wrapped, cameraHandler);
-        } catch (CameraAccessException | IllegalStateException e) {
-            Log.e(TAG, "Failed to create SharedCamera capture session", e);
-            setStatus("Failed to create SharedCamera capture session.");
+        } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
+            DiagnosticLog.e(TAG, "Failed to create SharedCamera capture session", e);
+            setStatus("Failed to create SharedCamera capture session.\nメニュー → ログをコピー");
         }
     }
 
@@ -434,10 +568,11 @@ public final class MainActivity extends Activity
             session.resume();
             arcoreActive = true;
             sharedCamera.setCaptureCallback(cameraCaptureCallback, cameraHandler);
+            DiagnosticLog.i(TAG, "ARCore resumed with SharedCamera");
             setStatus("SharedCamera active. Move steadily around the subject.\n" + cameraConfigSummary);
         } catch (CameraNotAvailableException e) {
-            Log.e(TAG, "Camera unavailable while resuming ARCore", e);
-            setStatus("Camera unavailable. Restart the app.");
+            DiagnosticLog.e(TAG, "Camera unavailable while resuming ARCore", e);
+            setStatus("Camera unavailable.\nメニュー → ログをコピー");
         }
     }
 
@@ -484,7 +619,6 @@ public final class MainActivity extends Activity
             try {
                 CaptureRequest.Builder still =
                         cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
-
                 for (Surface surface : sharedCamera.getArCoreSurfaces()) {
                     still.addTarget(surface);
                 }
@@ -519,19 +653,14 @@ public final class MainActivity extends Activity
 
                 captureSession.capture(still.build(), cameraCaptureCallback, cameraHandler);
             } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
-                Log.e(TAG, "Failed to submit photogrammetry JPEG", e);
+                DiagnosticLog.e(TAG, "Failed to submit photogrammetry JPEG", e);
                 failPendingPhoto();
             }
         });
     }
 
-    /**
-     * Converts the latest auto-exposure pair into a fast manual exposure with similar brightness.
-     * The lens focus distance from the already-focused repeating frame is frozen for the still.
-     */
     private boolean applyPhotogrammetryExposureAndFocus(CaptureRequest.Builder still) {
         if (!manualSensorSupported) {
-            Log.w(TAG, "Manual sensor control is unavailable; skipping texture still");
             return false;
         }
 
@@ -560,13 +689,9 @@ public final class MainActivity extends Activity
 
         long minExposure = exposureRange.getLower();
         long maxExposure = Math.min(exposureRange.getUpper(), MAX_STILL_EXPOSURE_NS);
-        if (minExposure > maxExposure) {
-            return false;
-        }
-
         int minIso = isoRange.getLower();
         int maxIso = Math.min(isoRange.getUpper(), MAX_PHOTOGRAMMETRY_ISO);
-        if (minIso > maxIso) {
+        if (minExposure > maxExposure || minIso > maxIso) {
             return false;
         }
 
@@ -576,13 +701,11 @@ public final class MainActivity extends Activity
 
         if (iso < minIso) {
             iso = minIso;
-            long adjusted = Math.round(exposureProduct / iso);
-            exposure = clampLong(adjusted, minExposure, maxExposure);
+            exposure = clampLong(Math.round(exposureProduct / iso), minExposure, maxExposure);
         } else if (iso > maxIso) {
             iso = maxIso;
             long requiredExposure = (long) Math.ceil(exposureProduct / iso);
             if (requiredExposure > maxExposure) {
-                // Too dark to satisfy both the anti-blur shutter limit and the ISO quality limit.
                 return false;
             }
             exposure = clampLong(requiredExposure, minExposure, maxExposure);
@@ -605,9 +728,9 @@ public final class MainActivity extends Activity
         }
         still.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
         still.set(CaptureRequest.LENS_FOCUS_DISTANCE, lockedFocusDistance);
-
-        Log.d(TAG, "Photogrammetry still exposure=" + exposure
-                + "ns ISO=" + iso + " focus=" + lockedFocusDistance + "D");
+        DiagnosticLog.i(TAG,
+                "Texture still exposure=" + exposure + "ns ISO=" + iso
+                        + " focus=" + lockedFocusDistance + "D");
         return true;
     }
 
@@ -619,6 +742,7 @@ public final class MainActivity extends Activity
 
     @Override
     protected void onPause() {
+        DiagnosticLog.i(TAG, "onPause");
         activityResumed = false;
         unregisterDisplayListener();
         surfaceView.onPause();
@@ -638,7 +762,7 @@ public final class MainActivity extends Activity
             try {
                 captureSession.close();
             } catch (RuntimeException e) {
-                Log.w(TAG, "Error closing capture session", e);
+                DiagnosticLog.w(TAG, "Error closing capture session", e);
             }
             captureSession = null;
         }
@@ -651,6 +775,7 @@ public final class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        DiagnosticLog.i(TAG, "onDestroy");
         activityResumed = false;
         closeCamera();
 
@@ -672,9 +797,7 @@ public final class MainActivity extends Activity
 
     @Override
     public void onRequestPermissionsResult(
-            int requestCode,
-            String[] permissions,
-            int[] grantResults) {
+            int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != CAMERA_PERMISSION_REQUEST) {
             return;
@@ -691,38 +814,16 @@ public final class MainActivity extends Activity
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         try {
+            cameraBackgroundRenderer.createOnGlThread(this);
             pointCloudRenderer.createOnGlThread(this);
-            cameraTextureId = createExternalCameraTexture();
             surfaceCreated = true;
+            DiagnosticLog.i(TAG,
+                    "GL resources ready cameraTexture=" + cameraBackgroundRenderer.getTextureId());
             runOnUiThread(this::openCameraForSharing);
         } catch (IOException | RuntimeException e) {
-            Log.e(TAG, "Failed to initialize OpenGL resources", e);
-            setStatus("Failed to initialize OpenGL resources.");
+            DiagnosticLog.e(TAG, "Failed to initialize OpenGL resources", e);
+            setStatus("Failed to initialize OpenGL resources.\nメニュー → ログをコピー");
         }
-    }
-
-    private static int createExternalCameraTexture() {
-        int[] textures = new int[1];
-        GLES20.glGenTextures(1, textures, 0);
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textures[0]);
-        GLES20.glTexParameteri(
-                GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                GLES20.GL_TEXTURE_MIN_FILTER,
-                GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(
-                GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                GLES20.GL_TEXTURE_MAG_FILTER,
-                GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(
-                GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                GLES20.GL_TEXTURE_WRAP_S,
-                GLES20.GL_CLAMP_TO_EDGE);
-        GLES20.glTexParameteri(
-                GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-                GLES20.GL_TEXTURE_WRAP_T,
-                GLES20.GL_CLAMP_TO_EDGE);
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
-        return textures[0];
     }
 
     @Override
@@ -743,13 +844,15 @@ public final class MainActivity extends Activity
         synchronized (frameInUseLock) {
             try {
                 updateDisplayGeometryIfNeeded();
-
                 Frame frame = session.update();
+
+                // The previous build created the OES camera texture but never drew it. Always draw
+                // the camera frame first, even when AR tracking is temporarily paused.
+                cameraBackgroundRenderer.draw(frame);
+
                 Camera camera = frame.getCamera();
                 if (camera.getTrackingState() != TrackingState.TRACKING) {
-                    if (depthReceived) {
-                        setStatus("AR tracking paused. Move slowly and keep scene detail visible.");
-                    }
+                    setStatus("AR tracking paused. Move slowly and keep scene detail visible.");
                     return;
                 }
 
@@ -782,18 +885,15 @@ public final class MainActivity extends Activity
                 pointCloudRenderer.draw(viewMatrix, projectionMatrix);
 
                 int photos = photoCaptureManager == null ? 0 : photoCaptureManager.getSavedCount();
-                String profile = photoCaptureManager == null
-                        ? "none" : photoCaptureManager.getProfileName();
                 setStatus(
-                        "Raw depth frames: " + pointCloudRenderer.getStoredFrameCount()
+                        "Raw depth: " + pointCloudRenderer.getStoredFrameCount()
                                 + " / texture photos: " + photos
-                                + " / " + profile
-                                + "\n1/500 target, <=1/300 save, ISO<=1600, focus locked per still"
+                                + "\n1/500 target / <=1/300 / ISO<=1600"
                                 + "\n" + cameraConfigSummary);
             } catch (Throwable t) {
-                Log.e(TAG, "OpenGL/ARCore frame failed", t);
-                setStatus("Frame processing failed. See logcat: "
-                        + t.getClass().getSimpleName());
+                DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed", t);
+                setStatus("Frame processing failed: " + t.getClass().getSimpleName()
+                        + "\nメニュー → ログをコピー");
             }
         }
     }
@@ -827,17 +927,15 @@ public final class MainActivity extends Activity
                 displayDegrees = 0;
                 break;
         }
-        Integer sensorOrientation =
-                cameraCharacteristics == null
-                        ? null
-                        : cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+        Integer sensorOrientation = cameraCharacteristics == null
+                ? null
+                : cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
         int sensor = sensorOrientation == null ? 90 : sensorOrientation;
         return (sensor - displayDegrees + 360) % 360;
     }
 
     private static boolean supportsManualSensor(CameraCharacteristics characteristics) {
-        int[] capabilities = characteristics.get(
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        int[] capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
         return contains(
                 capabilities,
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
@@ -870,6 +968,23 @@ public final class MainActivity extends Activity
             }
         }
         return false;
+    }
+
+    private static String cameraErrorName(int error) {
+        switch (error) {
+            case CameraDevice.StateCallback.ERROR_CAMERA_IN_USE:
+                return "CAMERA_IN_USE";
+            case CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE:
+                return "MAX_CAMERAS_IN_USE";
+            case CameraDevice.StateCallback.ERROR_CAMERA_DISABLED:
+                return "CAMERA_DISABLED";
+            case CameraDevice.StateCallback.ERROR_CAMERA_DEVICE:
+                return "CAMERA_DEVICE";
+            case CameraDevice.StateCallback.ERROR_CAMERA_SERVICE:
+                return "CAMERA_SERVICE";
+            default:
+                return "UNKNOWN";
+        }
     }
 
     private boolean hasCameraPermission() {
@@ -920,6 +1035,10 @@ public final class MainActivity extends Activity
         }
         lastStatus = text;
         runOnUiThread(() -> statusView.setText(text));
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     @Override
