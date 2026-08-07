@@ -12,6 +12,7 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.display.DisplayManager;
 import android.media.Image;
@@ -23,6 +24,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Log;
+import android.util.Range;
 import android.util.Size;
 import android.view.Gravity;
 import android.view.Surface;
@@ -56,11 +58,11 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 /**
- * Raw Depth point-cloud scanner with SharedCamera high-resolution texture capture.
+ * Raw Depth scanner with Camera2 SharedCamera texture acquisition for photogrammetry / 3DGS.
  *
- * <p>ARCore owns tracking and Raw Depth. Camera2 shares the same ARCore camera and adds an
- * occasional high-resolution JPEG stream. Each JPEG is synchronized to ARCore pose by sensor
- * timestamp in {@link HighResPhotoCaptureManager}.
+ * <p>ARCore is responsible for tracking, pose and Raw Depth. Camera2 is responsible for the
+ * reconstruction images. Texture stills use a short manual exposure and the most recently focused
+ * lens distance so that capture quality is determined by SfM/MVS needs rather than AR rendering.
  */
 public final class MainActivity extends Activity
         implements GLSurfaceView.Renderer, DisplayManager.DisplayListener {
@@ -68,6 +70,11 @@ public final class MainActivity extends Activity
     private static final String TAG = "PointCloudRawDepth";
     private static final int CAMERA_PERMISSION_REQUEST = 1001;
     private static final String HIGH_RES_CAPTURE_TAG = "pointcloud_high_res_texture";
+
+    // Pixel 10a photogrammetry policy.
+    private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L; // 1/500 s
+    private static final long MAX_STILL_EXPOSURE_NS = 3_333_333L;    // 1/300 s
+    private static final int MAX_PHOTOGRAMMETRY_ISO = 1600;
 
     private final PointCloudRenderer pointCloudRenderer = new PointCloudRenderer();
     private final Object frameInUseLock = new Object();
@@ -100,6 +107,7 @@ public final class MainActivity extends Activity
     private volatile boolean arcoreActive;
     private boolean depthReceived;
     private boolean displayListenerRegistered;
+    private boolean manualSensorSupported;
 
     private volatile boolean displayGeometryChanged = true;
     private volatile int viewportWidth;
@@ -107,6 +115,14 @@ public final class MainActivity extends Activity
     private long depthTimestamp = -1L;
     private String lastStatus = "";
     private String cameraConfigSummary = "camera=?";
+
+    // Latest Camera2/ARCore repeating-result state. Used to preserve scene brightness and lock focus
+    // for the one-shot reconstruction image.
+    private volatile Long latestExposureTimeNs;
+    private volatile Integer latestIso;
+    private volatile Float latestFocusDistanceDiopters;
+    private volatile Integer latestAfState;
+    private volatile Integer latestLensState;
 
     private final CameraDevice.StateCallback cameraDeviceCallback =
             new CameraDevice.StateCallback() {
@@ -151,9 +167,6 @@ public final class MainActivity extends Activity
                 public void onConfigured(CameraCaptureSession configuredSession) {
                     captureSession = configuredSession;
                     try {
-                        // This repeating request is submitted before ARCore is resumed. Once ARCore
-                        // becomes active it owns the repeating request; the app only submits
-                        // occasional one-shot high-resolution captures.
                         captureSession.setRepeatingRequest(
                                 previewCaptureRequestBuilder.build(),
                                 cameraCaptureCallback,
@@ -161,7 +174,6 @@ public final class MainActivity extends Activity
                     } catch (CameraAccessException | IllegalStateException e) {
                         Log.e(TAG, "Failed to start SharedCamera repeating request", e);
                         setStatus("Failed to start shared camera stream.");
-                        return;
                     }
                 }
 
@@ -175,8 +187,7 @@ public final class MainActivity extends Activity
                 @Override
                 public void onConfigureFailed(CameraCaptureSession failedSession) {
                     Log.e(TAG, "SharedCamera capture session configuration failed");
-                    setStatus(
-                            "Pixel 10a high-res camera stream could not be configured with ARCore.");
+                    setStatus("High-resolution texture stream could not be configured with ARCore.");
                 }
 
                 @Override
@@ -194,6 +205,7 @@ public final class MainActivity extends Activity
                         CameraCaptureSession captureSession,
                         CaptureRequest request,
                         TotalCaptureResult result) {
+                    recordLatestCameraState(result);
                     if (HIGH_RES_CAPTURE_TAG.equals(request.getTag())
                             && photoCaptureManager != null) {
                         photoCaptureManager.onCaptureCompleted(result);
@@ -279,8 +291,7 @@ public final class MainActivity extends Activity
         if (surfaceCreated) {
             openCameraForSharing();
         }
-
-        setStatus("Starting Pixel 10a SharedCamera / Raw Depth...");
+        setStatus("Starting Pixel 10a photogrammetry capture / Raw Depth...");
     }
 
     private boolean createSharedArSession() {
@@ -298,8 +309,7 @@ public final class MainActivity extends Activity
             session.setCameraConfig(cameraConfig);
 
             if (!session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
-                setStatus(
-                        "Raw Depth is not available with SharedCamera on this Pixel 10a camera config.");
+                setStatus("Raw Depth is not available with this SharedCamera config.");
                 session.close();
                 session = null;
                 return false;
@@ -316,6 +326,7 @@ public final class MainActivity extends Activity
             sharedCamera = session.getSharedCamera();
             cameraId = session.getCameraConfig().getCameraId();
             cameraCharacteristics = cameraManager.getCameraCharacteristics(cameraId);
+            manualSensorSupported = supportsManualSensor(cameraCharacteristics);
 
             jpegSize = HighResPhotoCaptureManager.chooseJpegSize(cameraCharacteristics);
             jpegReader = ImageReader.newInstance(
@@ -326,7 +337,6 @@ public final class MainActivity extends Activity
                 photoCaptureManager.configureCamera(cameraId, jpegSize, cameraCharacteristics);
             }
 
-            // Tell ARCore about the custom high-resolution still surface before opening the camera.
             sharedCamera.setAppSurfaces(
                     cameraId, Collections.singletonList(jpegReader.getSurface()));
 
@@ -335,7 +345,8 @@ public final class MainActivity extends Activity
             cameraConfigSummary =
                     "AR CPU " + cpu.getWidth() + "x" + cpu.getHeight()
                             + " / GPU " + gpu.getWidth() + "x" + gpu.getHeight()
-                            + " / JPEG " + jpegSize.getWidth() + "x" + jpegSize.getHeight();
+                            + " / JPEG " + jpegSize.getWidth() + "x" + jpegSize.getHeight()
+                            + " / manual=" + manualSensorSupported;
             Log.i(TAG, cameraConfigSummary
                     + " cameraId=" + cameraId
                     + " depthSensorUsage=" + session.getCameraConfig().getDepthSensorUsage());
@@ -351,7 +362,7 @@ public final class MainActivity extends Activity
             setStatus("This device is not ARCore compatible.");
         } catch (CameraAccessException | RuntimeException e) {
             Log.e(TAG, "Failed to create SharedCamera ARCore session", e);
-            setStatus("Failed to configure ARCore SharedCamera: " + e.getClass().getSimpleName());
+            setStatus("Failed to configure SharedCamera: " + e.getClass().getSimpleName());
         }
 
         if (session != null) {
@@ -423,18 +434,39 @@ public final class MainActivity extends Activity
             session.resume();
             arcoreActive = true;
             sharedCamera.setCaptureCallback(cameraCaptureCallback, cameraHandler);
-            setStatus("SharedCamera active. Move slowly around the subject.\n" + cameraConfigSummary);
+            setStatus("SharedCamera active. Move steadily around the subject.\n" + cameraConfigSummary);
         } catch (CameraNotAvailableException e) {
             Log.e(TAG, "Camera unavailable while resuming ARCore", e);
             setStatus("Camera unavailable. Restart the app.");
         }
     }
 
+    private void recordLatestCameraState(TotalCaptureResult result) {
+        Long exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+        Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+        Float focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
+        Integer af = result.get(CaptureResult.CONTROL_AF_STATE);
+        Integer lens = result.get(CaptureResult.LENS_STATE);
+        if (exposure != null) {
+            latestExposureTimeNs = exposure;
+        }
+        if (iso != null) {
+            latestIso = iso;
+        }
+        if (focus != null) {
+            latestFocusDistanceDiopters = focus;
+        }
+        if (af != null) {
+            latestAfState = af;
+        }
+        if (lens != null) {
+            latestLensState = lens;
+        }
+    }
+
     private void requestHighResolutionStill() {
         if (cameraHandler == null) {
-            if (photoCaptureManager != null) {
-                photoCaptureManager.onCaptureRequestFailed();
-            }
+            failPendingPhoto();
             return;
         }
 
@@ -443,10 +475,9 @@ public final class MainActivity extends Activity
                     || cameraDevice == null
                     || captureSession == null
                     || jpegReader == null
-                    || sharedCamera == null) {
-                if (photoCaptureManager != null) {
-                    photoCaptureManager.onCaptureRequestFailed();
-                }
+                    || sharedCamera == null
+                    || cameraCharacteristics == null) {
+                failPendingPhoto();
                 return;
             }
 
@@ -454,42 +485,30 @@ public final class MainActivity extends Activity
                 CaptureRequest.Builder still =
                         cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
 
-                // Feed the same sensor capture to ARCore surfaces as well as the JPEG reader. This
-                // gives ARCore an opportunity to expose a pose close to the JPEG sensor timestamp.
                 for (Surface surface : sharedCamera.getArCoreSurfaces()) {
                     still.addTarget(surface);
                 }
                 still.addTarget(jpegReader.getSurface());
                 still.setTag(HIGH_RES_CAPTURE_TAG);
-
-                still.set(
-                        CaptureRequest.CONTROL_AF_MODE,
-                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-                still.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
-                still.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
+                still.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
+                still.set(CaptureRequest.JPEG_ORIENTATION, computeJpegOrientation());
                 still.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
                 still.set(
                         CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                         CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
-                still.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
-                still.set(CaptureRequest.JPEG_ORIENTATION, computeJpegOrientation());
 
-                // Lock the already-good auto exposure / white balance for the one-shot still so
-                // the camera does not suddenly lengthen shutter time after the blur gate passed.
-                Boolean aeLockAvailable =
-                        cameraCharacteristics.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE);
-                if (Boolean.TRUE.equals(aeLockAvailable)) {
-                    still.set(CaptureRequest.CONTROL_AE_LOCK, true);
+                if (!applyPhotogrammetryExposureAndFocus(still)) {
+                    failPendingPhoto();
+                    return;
                 }
+
+                still.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
                 Boolean awbLockAvailable =
                         cameraCharacteristics.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE);
                 if (Boolean.TRUE.equals(awbLockAvailable)) {
                     still.set(CaptureRequest.CONTROL_AWB_LOCK, true);
                 }
 
-                // At <=1/100 s and very low phone motion we prefer stable optics/calibration over
-                // moving optical stabilization elements. Disable OIS only for the high-res still
-                // when Camera2 reports that OIS control exists.
                 int[] oisModes = cameraCharacteristics.get(
                         CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
                 if (contains(oisModes, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)) {
@@ -500,12 +519,102 @@ public final class MainActivity extends Activity
 
                 captureSession.capture(still.build(), cameraCaptureCallback, cameraHandler);
             } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
-                Log.e(TAG, "Failed to submit high-resolution JPEG", e);
-                if (photoCaptureManager != null) {
-                    photoCaptureManager.onCaptureRequestFailed();
-                }
+                Log.e(TAG, "Failed to submit photogrammetry JPEG", e);
+                failPendingPhoto();
             }
         });
+    }
+
+    /**
+     * Converts the latest auto-exposure pair into a fast manual exposure with similar brightness.
+     * The lens focus distance from the already-focused repeating frame is frozen for the still.
+     */
+    private boolean applyPhotogrammetryExposureAndFocus(CaptureRequest.Builder still) {
+        if (!manualSensorSupported) {
+            Log.w(TAG, "Manual sensor control is unavailable; skipping texture still");
+            return false;
+        }
+
+        Long autoExposure = latestExposureTimeNs;
+        Integer autoIso = latestIso;
+        Float focusDistance = latestFocusDistanceDiopters;
+        Integer lensState = latestLensState;
+        Integer afState = latestAfState;
+        if (autoExposure == null || autoIso == null || focusDistance == null) {
+            return false;
+        }
+        if (lensState != null && lensState != CaptureResult.LENS_STATE_STATIONARY) {
+            return false;
+        }
+        if (!isFocusedState(afState)) {
+            return false;
+        }
+
+        Range<Long> exposureRange = cameraCharacteristics.get(
+                CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        Range<Integer> isoRange = cameraCharacteristics.get(
+                CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        if (exposureRange == null || isoRange == null) {
+            return false;
+        }
+
+        long minExposure = exposureRange.getLower();
+        long maxExposure = Math.min(exposureRange.getUpper(), MAX_STILL_EXPOSURE_NS);
+        if (minExposure > maxExposure) {
+            return false;
+        }
+
+        int minIso = isoRange.getLower();
+        int maxIso = Math.min(isoRange.getUpper(), MAX_PHOTOGRAMMETRY_ISO);
+        if (minIso > maxIso) {
+            return false;
+        }
+
+        double exposureProduct = (double) autoExposure * (double) autoIso;
+        long exposure = clampLong(TARGET_STILL_EXPOSURE_NS, minExposure, maxExposure);
+        int iso = (int) Math.ceil(exposureProduct / exposure);
+
+        if (iso < minIso) {
+            iso = minIso;
+            long adjusted = Math.round(exposureProduct / iso);
+            exposure = clampLong(adjusted, minExposure, maxExposure);
+        } else if (iso > maxIso) {
+            iso = maxIso;
+            long requiredExposure = (long) Math.ceil(exposureProduct / iso);
+            if (requiredExposure > maxExposure) {
+                // Too dark to satisfy both the anti-blur shutter limit and the ISO quality limit.
+                return false;
+            }
+            exposure = clampLong(requiredExposure, minExposure, maxExposure);
+        }
+
+        iso = clampInt((int) Math.round(exposureProduct / exposure), minIso, maxIso);
+        if (exposure > MAX_STILL_EXPOSURE_NS || iso > MAX_PHOTOGRAMMETRY_ISO) {
+            return false;
+        }
+
+        still.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+        still.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure);
+        still.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+
+        float lockedFocusDistance = Math.max(0f, focusDistance);
+        Float minimumFocusDistance = cameraCharacteristics.get(
+                CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        if (minimumFocusDistance != null) {
+            lockedFocusDistance = Math.min(lockedFocusDistance, minimumFocusDistance);
+        }
+        still.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+        still.set(CaptureRequest.LENS_FOCUS_DISTANCE, lockedFocusDistance);
+
+        Log.d(TAG, "Photogrammetry still exposure=" + exposure
+                + "ns ISO=" + iso + " focus=" + lockedFocusDistance + "D");
+        return true;
+    }
+
+    private void failPendingPhoto() {
+        if (photoCaptureManager != null) {
+            photoCaptureManager.onCaptureRequestFailed();
+        }
     }
 
     @Override
@@ -677,8 +786,9 @@ public final class MainActivity extends Activity
                         ? "none" : photoCaptureManager.getProfileName();
                 setStatus(
                         "Raw depth frames: " + pointCloudRenderer.getStoredFrameCount()
-                                + " / high-res photos: " + photos
+                                + " / texture photos: " + photos
                                 + " / " + profile
+                                + "\n1/500 target, <=1/300 save, ISO<=1600, focus locked per still"
                                 + "\n" + cameraConfigSummary);
             } catch (Throwable t) {
                 Log.e(TAG, "OpenGL/ARCore frame failed", t);
@@ -723,6 +833,31 @@ public final class MainActivity extends Activity
                         : cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
         int sensor = sensorOrientation == null ? 90 : sensorOrientation;
         return (sensor - displayDegrees + 360) % 360;
+    }
+
+    private static boolean supportsManualSensor(CameraCharacteristics characteristics) {
+        int[] capabilities = characteristics.get(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        return contains(
+                capabilities,
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
+    }
+
+    private static boolean isFocusedState(Integer afState) {
+        if (afState == null) {
+            return false;
+        }
+        return afState == CaptureResult.CONTROL_AF_STATE_INACTIVE
+                || afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED
+                || afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED;
+    }
+
+    private static long clampLong(long value, long min, long max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private static boolean contains(int[] values, int target) {
