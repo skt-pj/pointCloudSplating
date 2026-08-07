@@ -10,6 +10,7 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.Size;
 import android.view.Gravity;
 import android.view.Surface;
 import android.widget.FrameLayout;
@@ -18,6 +19,7 @@ import android.widget.Toast;
 
 import com.google.ar.core.ArCoreApk;
 import com.google.ar.core.Camera;
+import com.google.ar.core.CameraConfig;
 import com.google.ar.core.Config;
 import com.google.ar.core.Frame;
 import com.google.ar.core.Session;
@@ -36,8 +38,8 @@ import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 /**
- * Minimal Raw Depth point-cloud viewer based on
- * google-ar/arcore-android-sdk samples/raw_depth_java.
+ * Raw Depth point-cloud scanner based on google-ar/arcore-android-sdk samples/raw_depth_java.
+ * Also stores sharp, pose-synchronized RGB frames for later photogrammetry / texture generation.
  */
 public final class MainActivity extends Activity
         implements GLSurfaceView.Renderer, DisplayManager.DisplayListener {
@@ -51,6 +53,7 @@ public final class MainActivity extends Activity
     private GLSurfaceView surfaceView;
     private TextView statusView;
     private Session session;
+    private PhotoCaptureManager photoCaptureManager;
     private DisplayManager displayManager;
     private boolean displayListenerRegistered;
     private boolean installRequested;
@@ -60,6 +63,7 @@ public final class MainActivity extends Activity
     private volatile int viewportHeight;
     private long depthTimestamp = -1L;
     private String lastStatus = "";
+    private String cameraConfigSummary = "camera=?";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -94,6 +98,14 @@ public final class MainActivity extends Activity
         setContentView(root);
 
         displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+
+        try {
+            photoCaptureManager = new PhotoCaptureManager(
+                    PhotoCaptureManager.getPicturesDirectory(this));
+            Log.i(TAG, "Texture captures: " + photoCaptureManager.getCaptureDirectoryPath());
+        } catch (RuntimeException e) {
+            Log.e(TAG, "Failed to initialize texture capture", e);
+        }
     }
 
     @Override
@@ -110,7 +122,7 @@ public final class MainActivity extends Activity
         }
 
         if (!session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
-            setStatus("Raw Depth API is not supported on this device.");
+            setStatus("Raw Depth API is not supported with the selected camera config.");
             session.close();
             session = null;
             return;
@@ -120,6 +132,20 @@ public final class MainActivity extends Activity
             synchronized (frameInUseLock) {
                 Config config = session.getConfig();
                 config.setDepthMode(Config.DepthMode.RAW_DEPTH_ONLY);
+
+                // ARCore documentation recommends AUTO for photography/video. Pixel 10a has PDAF
+                // and LDAF, so keep AF active and only save frames once the lens reports focused.
+                config.setFocusMode(Config.FocusMode.AUTO);
+
+                // EIS warps/crops the image geometry. Keep it off so saved image intrinsics remain
+                // suitable for photogrammetry. Pixel 10a optical stabilization can still operate.
+                config.setImageStabilizationMode(Config.ImageStabilizationMode.OFF);
+
+                // This scanner does not need plane finding or light estimation. Disabling them frees
+                // some compute budget for Raw Depth, RGB extraction and JPEG encoding.
+                config.setPlaneFindingMode(Config.PlaneFindingMode.DISABLED);
+                config.setLightEstimationMode(Config.LightEstimationMode.DISABLED);
+
                 session.configure(config);
                 session.resume();
             }
@@ -134,7 +160,8 @@ public final class MainActivity extends Activity
         surfaceView.onResume();
         registerDisplayListener();
         displayGeometryChanged = true;
-        setStatus("No depth yet. Move the device.");
+        setStatus("No depth yet. Move slowly; sharp RGB frames save automatically.\n"
+                + cameraConfigSummary);
     }
 
     private boolean createSession() {
@@ -146,7 +173,23 @@ public final class MainActivity extends Activity
                 case INSTALLED:
                     break;
             }
+
             session = new Session(this);
+
+            // Pixel 10a photogrammetry profile: prefer the largest CPU image stream among 30 fps
+            // configs. 30 fps typically permits a higher image resolution than 60 fps while our
+            // capture gate separately rejects long-exposure / blurred frames.
+            CameraConfig cameraConfig = CameraConfigSelector.selectHighestResolution30Fps(session);
+            session.setCameraConfig(cameraConfig);
+
+            Size imageSize = cameraConfig.getImageSize();
+            Size textureSize = cameraConfig.getTextureSize();
+            cameraConfigSummary = "CPU " + imageSize.getWidth() + "x" + imageSize.getHeight()
+                    + " / GPU " + textureSize.getWidth() + "x" + textureSize.getHeight()
+                    + " / " + cameraConfig.getFpsRange() + " fps";
+            Log.i(TAG, "ARCore camera config: " + cameraConfigSummary
+                    + ", cameraId=" + cameraConfig.getCameraId()
+                    + ", depthSensorUsage=" + cameraConfig.getDepthSensorUsage());
             return true;
         } catch (UnavailableArcoreNotInstalledException
                  | UnavailableUserDeclinedInstallationException e) {
@@ -158,7 +201,7 @@ public final class MainActivity extends Activity
         } catch (UnavailableDeviceNotCompatibleException e) {
             setStatus("This device is not ARCore compatible.");
         } catch (RuntimeException e) {
-            Log.e(TAG, "Failed to create ARCore session", e);
+            Log.e(TAG, "Failed to create/configure ARCore session", e);
             setStatus("Failed to create the ARCore session.");
         }
         return false;
@@ -176,6 +219,10 @@ public final class MainActivity extends Activity
 
     @Override
     protected void onDestroy() {
+        if (photoCaptureManager != null) {
+            photoCaptureManager.shutdown();
+            photoCaptureManager = null;
+        }
         if (session != null) {
             session.close();
             session = null;
@@ -231,8 +278,8 @@ public final class MainActivity extends Activity
             try {
                 updateDisplayGeometryIfNeeded();
 
-                // Raw Depth sample does not render the camera image, but ARCore still requires
-                // a camera texture name before Session.update().
+                // This app does not render the camera texture, but ARCore still requires a texture
+                // name before Session.update().
                 session.setCameraTextureNames(new int[] {0});
 
                 Frame frame = session.update();
@@ -240,9 +287,15 @@ public final class MainActivity extends Activity
 
                 if (camera.getTrackingState() != TrackingState.TRACKING) {
                     if (depthReceived) {
-                        setStatus("AR tracking is paused. Move the device slowly.");
+                        setStatus("AR tracking paused. Move slowly and keep scene detail visible.");
                     }
                     return;
+                }
+
+                // Save a texture image only when pose, exposure and autofocus metadata indicate a
+                // sharp frame. The image is copied immediately and encoded off the GL thread.
+                if (photoCaptureManager != null) {
+                    photoCaptureManager.consider(frame, camera);
                 }
 
                 boolean containsNewDepthData = false;
@@ -266,15 +319,20 @@ public final class MainActivity extends Activity
                 camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f);
                 float[] viewMatrix = new float[16];
                 camera.getViewMatrix(viewMatrix, 0);
-
                 pointCloudRenderer.draw(viewMatrix, projectionMatrix);
 
+                int photos = photoCaptureManager == null ? 0 : photoCaptureManager.getSavedCount();
+                String profile = photoCaptureManager != null
+                        && photoCaptureManager.isPixel10aProfile() ? "Pixel 10a" : "generic";
                 if (depthReceived) {
-                    setStatus(
-                            "Accumulated raw depth frames: "
-                                    + pointCloudRenderer.getStoredFrameCount());
+                    setStatus("Raw depth frames: " + pointCloudRenderer.getStoredFrameCount()
+                            + " / texture photos: " + photos
+                            + " / profile: " + profile
+                            + "\n" + cameraConfigSummary);
                 } else {
-                    setStatus("No depth yet. Move the device.");
+                    setStatus("No depth yet / texture photos: " + photos
+                            + " / profile: " + profile
+                            + "\n" + cameraConfigSummary);
                 }
             } catch (Throwable t) {
                 Log.e(TAG, "OpenGL/ARCore frame failed", t);
