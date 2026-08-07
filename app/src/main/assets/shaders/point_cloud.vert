@@ -1,25 +1,33 @@
+/*
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Adapted from google-ar/arcore-android-sdk samples/raw_depth_java.
+ */
+
 uniform mat4 u_ModelViewProjection;
 uniform float u_PointSize;
+uniform float u_ConfidenceThreshold;
+
 attribute vec4 a_Position;
+attribute vec3 a_Color;
+
 varying vec4 v_Color;
 
-vec3 polynomialColor(float x) {
-    x = clamp(x * 0.9 + 0.03, 0.0, 1.0);
-    vec4 v4 = vec4(1.0, x, x * x, x * x * x);
-    vec2 v2 = v4.zw * v4.z;
-    return vec3(
-        dot(v4, vec4(0.55305649, 3.00913185, -5.46192616, -11.11819092))
-            + dot(v2, vec2(27.81927491, -14.87899417)),
-        dot(v4, vec4(0.16207513, 0.17712472, 15.24091500, -36.50657960))
-            + dot(v2, vec2(25.95549545, -5.02738237)),
-        dot(v4, vec4(-0.05195877, 5.18000081, -30.94853351, 81.96403246))
-            + dot(v2, vec2(-86.53476570, 30.23299484))
-    );
-}
-
 void main() {
-    float normalizedHeight = clamp((a_Position.y + 2.0) / 4.0, 0.0, 1.0);
-    v_Color = vec4(polynomialColor(normalizedHeight), 1.0);
+    v_Color = vec4(a_Color, 1.0);
     gl_Position = u_ModelViewProjection * vec4(a_Position.xyz, 1.0);
+    gl_Position.w *= step(u_ConfidenceThreshold, a_Position.w);
     gl_PointSize = u_PointSize;
 }
