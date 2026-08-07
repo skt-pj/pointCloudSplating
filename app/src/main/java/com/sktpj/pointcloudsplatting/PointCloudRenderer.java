@@ -24,17 +24,15 @@ import android.opengl.Matrix;
 import java.io.IOException;
 import java.util.ArrayList;
 
-/** Renders accumulated Raw Depth frames as RGB-colored 3D points. */
+/** Renders accumulated Raw Depth frames as RGB-colored 3D points over the live camera view. */
 public final class PointCloudRenderer {
     private static final String TAG = "PointCloudRenderer";
 
     public static final int POSITION_FLOATS_PER_POINT = 4;
     public static final int COLOR_FLOATS_PER_POINT = 3;
 
-    private static final int POSITION_BYTES_PER_POINT =
-            Float.BYTES * POSITION_FLOATS_PER_POINT;
-    private static final int COLOR_BYTES_PER_POINT =
-            Float.BYTES * COLOR_FLOATS_PER_POINT;
+    private static final int POSITION_BYTES_PER_POINT = Float.BYTES * POSITION_FLOATS_PER_POINT;
+    private static final int COLOR_BYTES_PER_POINT = Float.BYTES * COLOR_FLOATS_PER_POINT;
     private static final int INITIAL_BUFFER_POINTS = 1_000;
     private static final int MAX_FRAMES_STORED = 60;
 
@@ -63,31 +61,18 @@ public final class PointCloudRenderer {
         positionBufferSize = INITIAL_BUFFER_POINTS * POSITION_BYTES_PER_POINT;
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, positionBuffer);
         GLES20.glBufferData(
-                GLES20.GL_ARRAY_BUFFER,
-                positionBufferSize,
-                null,
-                GLES20.GL_DYNAMIC_DRAW);
+                GLES20.GL_ARRAY_BUFFER, positionBufferSize, null, GLES20.GL_DYNAMIC_DRAW);
 
         colorBufferSize = INITIAL_BUFFER_POINTS * COLOR_BYTES_PER_POINT;
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colorBuffer);
         GLES20.glBufferData(
-                GLES20.GL_ARRAY_BUFFER,
-                colorBufferSize,
-                null,
-                GLES20.GL_DYNAMIC_DRAW);
-
+                GLES20.GL_ARRAY_BUFFER, colorBufferSize, null, GLES20.GL_DYNAMIC_DRAW);
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
 
         int vertexShader = ShaderUtil.loadShader(
-                TAG,
-                context,
-                GLES20.GL_VERTEX_SHADER,
-                "shaders/point_cloud.vert");
+                TAG, context, GLES20.GL_VERTEX_SHADER, "shaders/point_cloud.vert");
         int fragmentShader = ShaderUtil.loadShader(
-                TAG,
-                context,
-                GLES20.GL_FRAGMENT_SHADER,
-                "shaders/point_cloud.frag");
+                TAG, context, GLES20.GL_FRAGMENT_SHADER, "shaders/point_cloud.frag");
 
         program = GLES20.glCreateProgram();
         GLES20.glAttachShader(program, vertexShader);
@@ -97,18 +82,14 @@ public final class PointCloudRenderer {
         int[] linkStatus = new int[1];
         GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0);
         if (linkStatus[0] == 0) {
-            throw new IOException(
-                    "Point shader link failed: " + GLES20.glGetProgramInfoLog(program));
+            throw new IOException("Point shader link failed: " + GLES20.glGetProgramInfoLog(program));
         }
 
         positionAttribute = GLES20.glGetAttribLocation(program, "a_Position");
         colorAttribute = GLES20.glGetAttribLocation(program, "a_Color");
-        modelViewProjectionUniform =
-                GLES20.glGetUniformLocation(program, "u_ModelViewProjection");
+        modelViewProjectionUniform = GLES20.glGetUniformLocation(program, "u_ModelViewProjection");
         pointSizeUniform = GLES20.glGetUniformLocation(program, "u_PointSize");
-        confidenceThresholdUniform =
-                GLES20.glGetUniformLocation(program, "u_ConfidenceThreshold");
-
+        confidenceThresholdUniform = GLES20.glGetUniformLocation(program, "u_ConfidenceThreshold");
         ShaderUtil.checkGlError(TAG, "createOnGlThread");
     }
 
@@ -129,19 +110,18 @@ public final class PointCloudRenderer {
             return;
         }
 
-        moveCameraAlongLocalZAxis(viewMatrix, -1.0f);
-
         float[] modelMatrix = new float[16];
         float[] modelView = new float[16];
         float[] modelViewProjection = new float[16];
 
+        // Do not apply the -1m demonstration offset used by the upstream point-cloud-only sample.
+        // With a live camera background, the true ARCore view matrix is required for registration.
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthMask(true);
         GLES20.glUseProgram(program);
 
         for (DepthData depthFrame : depthFrames) {
-            int numPoints =
-                    depthFrame.getPoints().remaining() / POSITION_FLOATS_PER_POINT;
+            int numPoints = depthFrame.getPoints().remaining() / POSITION_FLOATS_PER_POINT;
             if (numPoints == 0) {
                 continue;
             }
@@ -152,15 +132,9 @@ public final class PointCloudRenderer {
             }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, positionBuffer);
             GLES20.glBufferData(
-                    GLES20.GL_ARRAY_BUFFER,
-                    positionBufferSize,
-                    null,
-                    GLES20.GL_DYNAMIC_DRAW);
+                    GLES20.GL_ARRAY_BUFFER, positionBufferSize, null, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBufferSubData(
-                    GLES20.GL_ARRAY_BUFFER,
-                    0,
-                    positionBytesNeeded,
-                    depthFrame.getPoints());
+                    GLES20.GL_ARRAY_BUFFER, 0, positionBytesNeeded, depthFrame.getPoints());
 
             int colorBytesNeeded = numPoints * COLOR_BYTES_PER_POINT;
             while (colorBytesNeeded > colorBufferSize) {
@@ -168,25 +142,13 @@ public final class PointCloudRenderer {
             }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, colorBuffer);
             GLES20.glBufferData(
-                    GLES20.GL_ARRAY_BUFFER,
-                    colorBufferSize,
-                    null,
-                    GLES20.GL_DYNAMIC_DRAW);
+                    GLES20.GL_ARRAY_BUFFER, colorBufferSize, null, GLES20.GL_DYNAMIC_DRAW);
             GLES20.glBufferSubData(
-                    GLES20.GL_ARRAY_BUFFER,
-                    0,
-                    colorBytesNeeded,
-                    depthFrame.getColors());
+                    GLES20.GL_ARRAY_BUFFER, 0, colorBytesNeeded, depthFrame.getColors());
 
             depthFrame.getModelMatrix(modelMatrix);
             Matrix.multiplyMM(modelView, 0, viewMatrix, 0, modelMatrix, 0);
-            Matrix.multiplyMM(
-                    modelViewProjection,
-                    0,
-                    projectionMatrix,
-                    0,
-                    modelView,
-                    0);
+            Matrix.multiplyMM(modelViewProjection, 0, projectionMatrix, 0, modelView, 0);
 
             GLES20.glEnableVertexAttribArray(positionAttribute);
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, positionBuffer);
@@ -209,11 +171,7 @@ public final class PointCloudRenderer {
                     0);
 
             GLES20.glUniformMatrix4fv(
-                    modelViewProjectionUniform,
-                    1,
-                    false,
-                    modelViewProjection,
-                    0);
+                    modelViewProjectionUniform, 1, false, modelViewProjection, 0);
             GLES20.glUniform1f(pointSizeUniform, 5.0f);
             GLES20.glUniform1f(confidenceThresholdUniform, minConfidence);
             GLES20.glDrawArrays(GLES20.GL_POINTS, 0, numPoints);
@@ -224,35 +182,5 @@ public final class PointCloudRenderer {
 
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0);
         ShaderUtil.checkGlError(TAG, "draw");
-    }
-
-    private static void moveCameraAlongLocalZAxis(float[] viewMatrix, float translation) {
-        float[] cameraToWorld = new float[16];
-        Matrix.invertM(cameraToWorld, 0, viewMatrix, 0);
-
-        float[] originalCameraPositionCS = new float[] {0f, 0f, 0f, 1f};
-        float[] modifiedCameraPositionCS = new float[] {0f, 0f, translation, 1f};
-        float[] originalCameraPositionWS = new float[4];
-        float[] modifiedCameraPositionWS = new float[4];
-
-        Matrix.multiplyMV(
-                originalCameraPositionWS,
-                0,
-                cameraToWorld,
-                0,
-                originalCameraPositionCS,
-                0);
-        Matrix.multiplyMV(
-                modifiedCameraPositionWS,
-                0,
-                cameraToWorld,
-                0,
-                modifiedCameraPositionCS,
-                0);
-
-        float deltaX = modifiedCameraPositionWS[0] - originalCameraPositionWS[0];
-        float deltaY = modifiedCameraPositionWS[1] - originalCameraPositionWS[1];
-        float deltaZ = modifiedCameraPositionWS[2] - originalCameraPositionWS[2];
-        Matrix.translateM(viewMatrix, 0, deltaX, deltaY, deltaZ);
     }
 }
