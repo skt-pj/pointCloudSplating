@@ -7,40 +7,63 @@ import com.google.ar.core.CameraConfig;
 import com.google.ar.core.CameraConfigFilter;
 import com.google.ar.core.Session;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 
-/** Selects the best 30 fps ARCore config that is compatible with SharedCamera. */
+/** Selects a 30 fps SharedCamera config that leaves stream bandwidth for texture JPEG capture. */
 public final class CameraConfigSelector {
     private static final String TAG = "CameraConfigSelector";
 
     private CameraConfigSelector() {}
 
-    public static CameraConfig selectHighestResolution30Fps(Session session) {
+    public static CameraConfig selectPhotogrammetry30Fps(Session session) {
+        CameraConfig current = session.getCameraConfig();
+        String currentCameraId = current.getCameraId();
+
         CameraConfigFilter filter = new CameraConfigFilter(session);
         filter.setTargetFps(EnumSet.of(CameraConfig.TargetFps.TARGET_FPS_30));
-
-        // SharedCamera cannot use an ARCore hardware depth sensor. Raw Depth may still be provided
-        // by ARCore's motion/software depth pipeline when the selected device/camera supports it.
         filter.setDepthSensorUsage(EnumSet.of(CameraConfig.DepthSensorUsage.DO_NOT_USE));
 
         List<CameraConfig> configs = session.getSupportedCameraConfigs(filter);
         if (configs.isEmpty()) {
-            Log.w(TAG, "No SharedCamera-compatible 30 fps configs; keeping ARCore default config");
-            return session.getCameraConfig();
+            DiagnosticLog.w(TAG, "No 30 fps SharedCamera configs; keeping default config");
+            return current;
         }
 
-        CameraConfig best = configs.stream()
-                .max(Comparator.comparingLong(CameraConfigSelector::cpuPixelCount)
-                        .thenComparingLong(CameraConfigSelector::gpuPixelCount))
-                .orElse(configs.get(0));
+        // Keep the same physical camera ARCore selected by default. Switching camera IDs here can
+        // silently move to a different rear lens and invalidate the intended photogrammetry setup.
+        List<CameraConfig> sameCamera = new ArrayList<>();
+        for (CameraConfig config : configs) {
+            if (currentCameraId.equals(config.getCameraId())) {
+                sameCamera.add(config);
+            }
+        }
+        List<CameraConfig> candidates = sameCamera.isEmpty() ? configs : sameCamera;
+
+        // ARCore always needs a tracking CPU stream and a GPU stream. A high CPU image config can
+        // introduce another ARCore surface. We intentionally choose the smallest CPU image size so
+        // the Pixel 10a still has stream bandwidth for the occasional ~12 MP JPEG surface. Among
+        // equally small CPU configs, keep the largest GPU preview resolution.
+        long minCpuPixels = candidates.stream()
+                .mapToLong(CameraConfigSelector::cpuPixelCount)
+                .min()
+                .orElse(cpuPixelCount(current));
+
+        CameraConfig best = candidates.stream()
+                .filter(config -> cpuPixelCount(config) == minCpuPixels)
+                .max(Comparator.comparingLong(CameraConfigSelector::gpuPixelCount))
+                .orElse(current);
 
         Size cpu = best.getImageSize();
         Size gpu = best.getTextureSize();
-        Log.i(TAG, "Selected SharedCamera config CPU=" + cpu.getWidth() + "x" + cpu.getHeight()
-                + " GPU=" + gpu.getWidth() + "x" + gpu.getHeight()
-                + " depthSensorUsage=" + best.getDepthSensorUsage());
+        DiagnosticLog.i(TAG,
+                "Selected stream-safe SharedCamera config CPU="
+                        + cpu.getWidth() + "x" + cpu.getHeight()
+                        + " GPU=" + gpu.getWidth() + "x" + gpu.getHeight()
+                        + " cameraId=" + best.getCameraId()
+                        + " depthSensorUsage=" + best.getDepthSensorUsage());
         return best;
     }
 
