@@ -11,7 +11,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 
-/** Selects a 30 fps ARCore camera configuration with the largest available CPU image stream. */
+/** Selects the best 30 fps ARCore config that is compatible with SharedCamera. */
 public final class CameraConfigSelector {
     private static final String TAG = "CameraConfigSelector";
 
@@ -20,9 +20,14 @@ public final class CameraConfigSelector {
     public static CameraConfig selectHighestResolution30Fps(Session session) {
         CameraConfigFilter filter = new CameraConfigFilter(session);
         filter.setTargetFps(EnumSet.of(CameraConfig.TargetFps.TARGET_FPS_30));
+
+        // SharedCamera cannot use an ARCore hardware depth sensor. Raw Depth may still be provided
+        // by ARCore's motion/software depth pipeline when the selected device/camera supports it.
+        filter.setDepthSensorUsage(EnumSet.of(CameraConfig.DepthSensorUsage.DO_NOT_USE));
+
         List<CameraConfig> configs = session.getSupportedCameraConfigs(filter);
         if (configs.isEmpty()) {
-            Log.w(TAG, "No 30 fps camera configs; keeping ARCore default config");
+            Log.w(TAG, "No SharedCamera-compatible 30 fps configs; keeping ARCore default config");
             return session.getCameraConfig();
         }
 
@@ -33,8 +38,9 @@ public final class CameraConfigSelector {
 
         Size cpu = best.getImageSize();
         Size gpu = best.getTextureSize();
-        Log.i(TAG, "Selected camera config CPU=" + cpu.getWidth() + "x" + cpu.getHeight()
-                + " GPU=" + gpu.getWidth() + "x" + gpu.getHeight());
+        Log.i(TAG, "Selected SharedCamera config CPU=" + cpu.getWidth() + "x" + cpu.getHeight()
+                + " GPU=" + gpu.getWidth() + "x" + gpu.getHeight()
+                + " depthSensorUsage=" + best.getDepthSensorUsage());
         return best;
     }
 
