@@ -73,9 +73,6 @@ s = s.replace('''    if (compatible_subgroup_size && (
         _THROW_ERROR_ALWAYS("Pixel 10a 3DGS expects Mali native subgroup size 16; device reports " + std::to_string(deviceInfo.subgroupSize));
 ''')
 
-# Android's API-24 Vulkan stub only exports Vulkan 1.0 entry points. Vulkan 1.1/core-2 queries
-# must be resolved through vkGetInstanceProcAddr even on modern phones; otherwise the arm64 shared
-# library fails at link time despite the runtime supporting the functions.
 props_call = '        vkGetPhysicalDeviceProperties2(device, &deviceProperties2);\n'
 props_dyn = '''        auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
@@ -118,17 +115,23 @@ p = Path(sys.argv[1])
 s = p.read_text()
 s = s.replace('dataparser_transform = ColmapReader::normalize_world_space(c2w_poses, points);',
               'dataparser_transform = ColmapReader::normalize_world_space(c2w_poses, points, false);')
+# PCS writes intrinsics for the exact resized training JPEG dimensions. Disable VkSplat's
+# Mip-NeRF-specific images_2/images_4 directory-name rescaling; otherwise the already-scaled
+# Camera2 intrinsics are scaled twice before the image-dimension correction path runs.
+needle = '''      #if 1
+        // to be consistent with gsplat, especially on Mip-NeRF 360; TODO: refactor instead of hard code
+'''
+replacement = '''      #if 0
+        // Disabled on Android PCS datasets: cameras.txt already matches the actual working JPEGs.
+'''
+if needle not in s:
+    raise SystemExit('VkSplat image factor patch anchor not found')
+s = s.replace(needle, replacement, 1)
 p.write_text(s)
 PY
 
 sed -i 's/#define ENABLE_ASSERTION 0/#define ENABLE_ASSERTION 1/' "$THIRD/vksplat/vksplat/src/config.h"
 
-# VkSplat ships portable Vulkan radix-sort SPIR-V already. Its GLSL source relies on
-# GL_ARB_shading_language_include, which Android NDK glslc intentionally does not expose.
-# Keep the pinned upstream radix SPIR-V and rebuild only the differentiable Slang kernels whose
-# config changed for mobile Int64/F32-atomic emulation. The upstream helper also treats compiler
-# warnings as failures even when SPIR-V was produced; on the pinned 2026 Slang compiler those
-# warnings are diagnostics only, so retain them in CI output but do not fail a successful compile.
 python3 - "$THIRD/vksplat/compile_shaders.py" <<'PY'
 from pathlib import Path
 import sys
@@ -190,7 +193,6 @@ cp -R "$THIRD/vksplat/vksplat/shader/." "$ASSET_DIR/"
 printf '%s\n' "$VKSPLAT_COMMIT" > "$ASSET_DIR/VKSPLAT_COMMIT.txt"
 printf '%s\n' "$SLANG_VERSION" > "$ASSET_DIR/SLANG_VERSION.txt"
 
-# Package third-party attribution with the app. No source files are exposed as user artifacts.
 cp "$THIRD/vksplat/LICENSE" "$NOTICE_DIR/VkSplat-LICENSE.txt"
 printf 'VkSplat source commit: %s\nhttps://github.com/harry7557558/vksplat\n' "$VKSPLAT_COMMIT" > "$NOTICE_DIR/VkSplat-NOTICE.txt"
 if [[ -f "$THIRD/glm/copying.txt" ]]; then cp "$THIRD/glm/copying.txt" "$NOTICE_DIR/GLM-LICENSE.txt"; fi
