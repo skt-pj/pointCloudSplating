@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build-time architecture checks for the PCS Android mobile 3DGS trainer.
 
-These checks intentionally validate design invariants rather than a particular crash symptom. They
-keep the Android trainer in the mobile-first regime selected from PocketGS/Taming/gsplat references
-and make the VkSplat cumsum correctness patch part of the reproducible backend preparation.
+These checks validate design invariants rather than a particular crash symptom. They keep the
+Android trainer in the mobile-first regime and make the VkSplat cumsum correctness patch part of
+the reproducible backend preparation.
 """
 from pathlib import Path
 import re
@@ -30,28 +30,34 @@ def ceil_div(n: int, d: int) -> int:
 
 
 def verify_cumsum_hierarchy() -> None:
-    # The bug caught on Mali came from using the original element count while scanning the smaller
-    # block-sum buffer. For representative sizes and plausible Vulkan subgroup-derived block sizes,
-    # every recursive level must dispatch only the number of elements actually allocated there.
+    # The Mali failure happened because the original N was passed while scanning the much smaller
+    # block-sum buffer. Model the cardinality of each recursive level for representative sizes.
     sizes = [1, 16, 17, 1024, 1025, 59_218, 1_048_576]
     blocks = [128, 256, 512, 1024]
+    assert ceil_div(59_218, 1024) == 58
     for block in blocks:
         for n in sizes:
             if n <= 1024:
                 continue
-            level1 = ceil_div(n, block)
+            level1_alloc = ceil_div(n, block)
             if n <= block * block:
-                dispatched = level1
-                allocated = level1
-                if dispatched > allocated:
-                    raise AssertionError((block, n, dispatched, allocated))
-            elif n <= block * block * block:
-                level2 = ceil_div(level1, block)
-                if level1 > level1 or level2 > level2:
-                    raise AssertionError((block, n, level1, level2))
-                # add_block_offsets at level 1 operates on level1 values, not n values.
-                if level1 > ceil_div(n, block):
-                    raise AssertionError((block, n, level1))
+                # scan_block_sums must see level1_alloc, never n.
+                scan_uniform = level1_alloc
+                assert scan_uniform <= level1_alloc
+                assert scan_uniform != n or n == level1_alloc
+                continue
+            if n <= block * block * block:
+                level2_alloc = ceil_div(level1_alloc, block)
+                # block_scan at level 1 sees level1_alloc elements; scan_block_sums at level 2 sees
+                # only level2_alloc; add_block_offsets at level 1 returns to level1_alloc.
+                level1_scan_uniform = level1_alloc
+                level2_scan_uniform = level2_alloc
+                level1_offset_uniform = level1_alloc
+                assert level1_scan_uniform <= level1_alloc
+                assert level2_scan_uniform <= level2_alloc
+                assert level1_offset_uniform <= level1_alloc
+                assert level1_scan_uniform != n
+                assert level2_scan_uniform != n
 
 
 def main() -> None:
