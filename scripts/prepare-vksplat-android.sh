@@ -71,6 +71,42 @@ s = s.replace('''    if (compatible_subgroup_size && (
 ''', '''    if (compatible_subgroup_size && deviceInfo.subgroupSize != SUBGROUP_SIZE)
         _THROW_ERROR_ALWAYS("Android 3DGS requires native subgroup size 32; device reports " + std::to_string(deviceInfo.subgroupSize));
 ''')
+
+# Android's API-24 Vulkan stub only exports Vulkan 1.0 entry points. Vulkan 1.1/core-2 queries
+# must be resolved through vkGetInstanceProcAddr even on modern phones; otherwise the arm64 shared
+# library fails at link time despite the runtime supporting the functions.
+props_call = '        vkGetPhysicalDeviceProperties2(device, &deviceProperties2);\n'
+props_dyn = '''        auto getProperties2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
+            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
+        if (getProperties2) {
+            getProperties2(device, &deviceProperties2);
+        } else {
+            auto getProperties2KHR = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2KHR>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR"));
+            if (!getProperties2KHR)
+                _THROW_ERROR_ALWAYS("Vulkan physical-device properties2 query is unavailable");
+            getProperties2KHR(device, reinterpret_cast<VkPhysicalDeviceProperties2KHR*>(&deviceProperties2));
+        }
+'''
+if props_call not in s:
+    raise SystemExit('VkSplat properties2 call anchor not found')
+s = s.replace(props_call, props_dyn)
+features_call = '        vkGetPhysicalDeviceFeatures2(device, &deviceFeatures2);\n'
+features_dyn = '''        auto getFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+            vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2"));
+        if (getFeatures2) {
+            getFeatures2(device, &deviceFeatures2);
+        } else {
+            auto getFeatures2KHR = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2KHR>(
+                vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2KHR"));
+            if (!getFeatures2KHR)
+                _THROW_ERROR_ALWAYS("Vulkan physical-device features2 query is unavailable");
+            getFeatures2KHR(device, reinterpret_cast<VkPhysicalDeviceFeatures2KHR*>(&deviceFeatures2));
+        }
+'''
+if features_call not in s:
+    raise SystemExit('VkSplat features2 call anchor not found')
+s = s.replace(features_call, features_dyn)
 p.write_text(s)
 PY
 
