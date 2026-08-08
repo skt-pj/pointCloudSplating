@@ -43,7 +43,6 @@ jobs:
         run: |
           chmod +x scripts/prepare-vksplat-android.sh
           scripts/prepare-vksplat-android.sh
-          python3 scripts/patch-vksplat-cumsum-android.py
 
       - name: Verify mobile trainer architecture
         run: python3 scripts/verify-mobile-trainer.py
