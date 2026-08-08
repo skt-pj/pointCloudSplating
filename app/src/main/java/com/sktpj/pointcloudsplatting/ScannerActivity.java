@@ -72,12 +72,13 @@ public final class ScannerActivity extends Activity
     private static final int MENU_COPY_LOG = 1;
     private static final int MENU_COPY_DATASET_PATH = 2;
     private static final String HIGH_RES_CAPTURE_TAG = "dataset_texture_still";
+    private static final int MIN_3DGS_KEYFRAMES = 8;
 
-    // Photogrammetry capture policy. Prefer 1/500; in darker indoor scenes permit 1/250 and ISO3200
-    // rather than silently producing no reconstruction images.
+    // Prefer a short 1/500 exposure, but allow a practical indoor fallback rather than producing
+    // zero reconstruction images. Motion/focus gates still reject frames likely to be blurred.
     private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L; // 1/500 s
-    private static final long MAX_STILL_EXPOSURE_NS = 4_000_000L;    // 1/250 s
-    private static final int MAX_PHOTOGRAMMETRY_ISO = 3200;
+    private static final long MAX_STILL_EXPOSURE_NS = 8_000_000L;    // 1/125 s
+    private static final int MAX_PHOTOGRAMMETRY_ISO = 6400;
 
     private final PointCloudRenderer pointCloudRenderer = new PointCloudRenderer();
     private final CameraBackgroundRenderer cameraBackgroundRenderer = new CameraBackgroundRenderer();
@@ -120,6 +121,7 @@ public final class ScannerActivity extends Activity
     private String cameraConfigSummary = "camera=?";
     private volatile boolean captureFinalized;
     private volatile boolean saveInProgress;
+    private volatile boolean runGaussianAfterSave;
     private volatile String finalizedDatasetPath;
     private Anchor datasetRootAnchor;
 
@@ -287,7 +289,7 @@ public final class ScannerActivity extends Activity
         gaussianButton.setText("3DGS化");
         gaussianButton.setTextColor(0xFFFFFFFF);
         gaussianButton.setBackgroundColor(0xAA202020);
-        gaussianButton.setEnabled(false);
+        gaussianButton.setEnabled(true);
         gaussianButton.setOnClickListener(v -> startGaussianSplatting());
 
         FrameLayout root = new FrameLayout(this);
@@ -357,7 +359,6 @@ public final class ScannerActivity extends Activity
         popup.show();
     }
 
-
     private String getCurrentDatasetPath() {
         if (finalizedDatasetPath != null) {
             return finalizedDatasetPath;
@@ -370,14 +371,21 @@ public final class ScannerActivity extends Activity
     private void saveCurrentDataset() {
         DatasetCaptureManager manager = datasetCaptureManager;
         if (manager == null) {
+            runGaussianAfterSave = false;
             Toast.makeText(this, "保存対象がありません", Toast.LENGTH_SHORT).show();
             return;
         }
         if (captureFinalized) {
-            Toast.makeText(this, "すでに保存済みです", Toast.LENGTH_SHORT).show();
+            if (runGaussianAfterSave) {
+                runGaussianAfterSave = false;
+                startGaussianSplatting();
+            } else {
+                Toast.makeText(this, "すでに保存済みです", Toast.LENGTH_SHORT).show();
+            }
             return;
         }
         if (saveInProgress) {
+            Toast.makeText(this, "保存処理中です", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -392,7 +400,9 @@ public final class ScannerActivity extends Activity
                 manager.resumeCapture();
                 runOnUiThread(() -> {
                     saveInProgress = false;
+                    runGaussianAfterSave = false;
                     saveButton.setEnabled(true);
+                    gaussianButton.setEnabled(true);
                     setStatus("保存できませんでした。撮影中のフレーム完了後にもう一度押してください。");
                 });
                 return;
@@ -411,9 +421,15 @@ public final class ScannerActivity extends Activity
                     setStatus("保存完了: " + result.frameCount + " keyframes\n"
                             + finalizedDatasetPath);
                     Toast.makeText(this, "データセットを保存しました", Toast.LENGTH_SHORT).show();
+                    if (runGaussianAfterSave) {
+                        runGaussianAfterSave = false;
+                        startGaussianSplatting();
+                    }
                 } else {
+                    runGaussianAfterSave = false;
                     manager.resumeCapture();
                     saveButton.setEnabled(true);
+                    gaussianButton.setEnabled(true);
                     setStatus("保存失敗: " + result.message);
                 }
             });
@@ -421,28 +437,45 @@ public final class ScannerActivity extends Activity
     }
 
     private void startGaussianSplatting() {
+        if (saveInProgress) {
+            Toast.makeText(this, "保存処理中です", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         if (!captureFinalized || finalizedDatasetPath == null) {
-            Toast.makeText(this, "先に保存してください", Toast.LENGTH_SHORT).show();
+            DatasetCaptureManager manager = datasetCaptureManager;
+            int count = manager == null ? 0 : manager.getSavedCount();
+            if (count < MIN_3DGS_KEYFRAMES) {
+                String message = "3DGSには最低" + MIN_3DGS_KEYFRAMES
+                        + " keyframes必要です。現在" + count + "枚。撮影を続けてください。";
+                setStatus(message);
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                return;
+            }
+            runGaussianAfterSave = true;
+            setStatus("3DGS開始: datasetを保存確定しています...");
+            saveCurrentDataset();
             return;
         }
 
         gaussianButton.setEnabled(false);
-        setStatus("3DGS入力を検証しています...");
+        setStatus("3DGSを生成しています...");
         File datasetDirectory = new File(finalizedDatasetPath);
         new Thread(() -> {
             GaussianSplatJob.Result result = GaussianSplatJob.prepare(datasetDirectory);
             runOnUiThread(() -> {
                 gaussianButton.setEnabled(true);
                 if (result.success) {
-                    setStatus("3DGS開始要求を作成: " + result.frameCount + " keyframes\n"
-                            + "Native Vulkan trainerは次の実装段階です。");
-                    Toast.makeText(this, "3DGS入力準備完了", Toast.LENGTH_SHORT).show();
+                    String output = result.outputFile == null
+                            ? finalizedDatasetPath : result.outputFile.getAbsolutePath();
+                    setStatus("3DGS生成完了: " + result.gaussianCount + " Gaussians\n" + output);
+                    Toast.makeText(this, "3DGS生成完了", Toast.LENGTH_LONG).show();
                 } else {
-                    setStatus("3DGS開始不可: " + result.message);
+                    setStatus("3DGS生成失敗: " + result.message);
                     Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 }
             });
-        }, "Prepare3DGS").start();
+        }, "Generate3DGS").start();
     }
 
     private void copyLogsToClipboard() {
@@ -824,7 +857,7 @@ public final class ScannerActivity extends Activity
             iso = maxIso;
             long requiredExposure = (long) Math.ceil(exposureProduct / iso);
             if (requiredExposure > maxExposure) {
-                return "scene too dark for <=1/250 and ISO<=3200";
+                return "scene too dark even for <=1/125 and ISO<=6400";
             }
             exposure = clampLong(requiredExposure, minExposure, maxExposure);
         }
@@ -1015,7 +1048,8 @@ public final class ScannerActivity extends Activity
                         "Raw depth: " + pointCloudRenderer.getStoredFrameCount()
                                 + " / keyframes: " + photos + " / " + captureState
                                 + "\nphoto: " + decision
-                                + "\n1/500 target / <=1/250 / ISO<=3200"
+                                + "\n3DGS: " + photos + "/" + MIN_3DGS_KEYFRAMES + "+ keyframes"
+                                + " / 1/500 target / <=1/125 / ISO<=6400"
                                 + "\n" + cameraConfigSummary);
             } catch (Throwable t) {
                 DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed", t);
