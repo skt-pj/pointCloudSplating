@@ -21,6 +21,7 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text()
+s = s.replace('#define SUBGROUP_SIZE 32', '#define SUBGROUP_SIZE 16')
 s = s.replace('#define USE_EMULATED_INT64 0', '#define USE_EMULATED_INT64 1')
 s = s.replace('#define USE_EMULATED_F32_ATOMIC 0', '#define USE_EMULATED_F32_ATOMIC 1')
 p.write_text(s)
@@ -69,7 +70,7 @@ s = s.replace('''    if (compatible_subgroup_size && (
     ))
         compute_shader_stage_info.pNext = &req;
 ''', '''    if (compatible_subgroup_size && deviceInfo.subgroupSize != SUBGROUP_SIZE)
-        _THROW_ERROR_ALWAYS("Android 3DGS requires native subgroup size 32; device reports " + std::to_string(deviceInfo.subgroupSize));
+        _THROW_ERROR_ALWAYS("Pixel 10a 3DGS expects Mali native subgroup size 16; device reports " + std::to_string(deviceInfo.subgroupSize));
 ''')
 
 # Android's API-24 Vulkan stub only exports Vulkan 1.0 entry points. Vulkan 1.1/core-2 queries
@@ -194,4 +195,4 @@ cp "$THIRD/vksplat/LICENSE" "$NOTICE_DIR/VkSplat-LICENSE.txt"
 printf 'VkSplat source commit: %s\nhttps://github.com/harry7557558/vksplat\n' "$VKSPLAT_COMMIT" > "$NOTICE_DIR/VkSplat-NOTICE.txt"
 if [[ -f "$THIRD/glm/copying.txt" ]]; then cp "$THIRD/glm/copying.txt" "$NOTICE_DIR/GLM-LICENSE.txt"; fi
 
-echo "Prepared VkSplat $VKSPLAT_COMMIT for Android"
+echo "Prepared VkSplat $VKSPLAT_COMMIT for Android Mali subgroup 16"
