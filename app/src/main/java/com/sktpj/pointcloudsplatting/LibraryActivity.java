@@ -174,46 +174,43 @@ public final class LibraryActivity extends Activity {
 
     private void openOrPrepare(File dataset, TextView status) {
         migrateLegacyDepthPrior(dataset);
-        if (isPhotometricComplete(dataset)) {
+        if (isViewableGaussian(dataset)) {
             openViewer(dataset);
             return;
         }
 
-        File prior = new File(dataset, DEPTH_PRIOR);
-        if (prior.isFile()) {
-            Toast.makeText(this,
-                    "Depth priorは準備済みです。RGB photometric 3DGS学習はまだ未完了です。",
-                    Toast.LENGTH_LONG).show();
-            return;
-        }
-
         if (generationInProgress) {
-            Toast.makeText(this, "Depth prior初期化処理中です", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "高品質Gaussian処理中です", Toast.LENGTH_SHORT).show();
             return;
         }
         generationInProgress = true;
-        status.setText("Depth prior初期化中...\n3DGS学習とは別処理です");
-        Toast.makeText(this, "Depth priorを初期化しています", Toast.LENGTH_SHORT).show();
+        File prior = new File(dataset, DEPTH_PRIOR);
+        status.setText(prior.isFile()
+                ? "高解像度RGB反映中...\nJPEG + Pose + intrinsicsを使用"
+                : "Depth prior + 高解像度RGB処理中...");
+        Toast.makeText(this,
+                prior.isFile() ? "高解像度RGBをGaussianへ反映しています"
+                        : "Depth priorを作成後、高解像度RGBを反映します",
+                Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             GaussianSplatJob.Result result = GaussianSplatJob.prepare(dataset);
             runOnUiThread(() -> {
                 generationInProgress = false;
                 status.setText(buildDatasetStatus(dataset));
-                if (result.success && isPhotometricComplete(dataset)) {
-                    openViewer(dataset);
-                } else if (result.priorReady) {
+                if (result.success || result.hqReady) {
                     Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
+                    openViewer(dataset);
                 } else {
                     Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 }
             });
-        }, "LibraryDepthPrior").start();
+        }, "LibraryHighQualityGaussian").start();
     }
 
     private void openViewer(File dataset) {
-        if (!isPhotometricComplete(dataset)) {
+        if (!isViewableGaussian(dataset)) {
             Toast.makeText(this,
-                    "photometric optimization済み3DGSではありません",
+                    "表示できるGaussianモデルがまだありません",
                     Toast.LENGTH_LONG).show();
             return;
         }
@@ -229,7 +226,18 @@ public final class LibraryActivity extends Activity {
             String gaussianText = gaussians > 0
                     ? String.format(Locale.US, "%,d Gaussians", gaussians)
                     : "3DGS学習済み";
-            return frames + " keyframes\n" + gaussianText + " / RGB最適化済み";
+            return frames + " keyframes\n" + gaussianText + " / Full RGB最適化済み";
+        }
+        if (isHqPreview(dataset)) {
+            int gaussians = readGaussianCount(dataset);
+            int textured = readTexturedGaussianCount(dataset);
+            String counts = gaussians > 0
+                    ? String.format(Locale.US, "HQ: %,d Gaussians", gaussians)
+                    : "HQ RGB反映済み";
+            if (textured > 0) {
+                counts += String.format(Locale.US, " / %,d RGB", textured);
+            }
+            return frames + " keyframes\n" + counts + "\nFull Vulkan最適化は未完了";
         }
 
         File prior = new File(dataset, DEPTH_PRIOR);
@@ -238,9 +246,9 @@ public final class LibraryActivity extends Activity {
             String priorText = gaussians > 0
                     ? String.format(Locale.US, "Depth prior: %,d Gaussians", gaussians)
                     : "Depth prior準備済み";
-            return frames + " keyframes\n" + priorText + " / 3DGS未学習";
+            return frames + " keyframes\n" + priorText + "\nタップで高解像度RGB反映";
         }
-        return frames + " keyframes\n3DGS未学習 — タップでDepth初期化";
+        return frames + " keyframes\n未処理 — タップでDepth + 高品質RGB";
     }
 
     private static boolean isPhotometricComplete(File dataset) {
@@ -253,6 +261,22 @@ public final class LibraryActivity extends Activity {
                 && result.optBoolean("photometric_optimization", false)
                 && result.optBoolean("final_3dgs", false)
                 && "COMPLETE".equals(result.optString("status", ""));
+    }
+
+    private static boolean isHqPreview(File dataset) {
+        File splat = new File(dataset, FINAL_SPLAT);
+        if (!splat.isFile()) {
+            return false;
+        }
+        JSONObject result = readResult(dataset);
+        return result != null
+                && result.optBoolean("photometric_optimization", false)
+                && !result.optBoolean("final_3dgs", false)
+                && "HQ_RGB_REFINED".equals(result.optString("status", ""));
+    }
+
+    private static boolean isViewableGaussian(File dataset) {
+        return isPhotometricComplete(dataset) || isHqPreview(dataset);
     }
 
     /**
@@ -350,6 +374,11 @@ public final class LibraryActivity extends Activity {
     private static int readGaussianCount(File dataset) {
         JSONObject result = readResult(dataset);
         return result == null ? 0 : result.optInt("gaussian_count", 0);
+    }
+
+    private static int readTexturedGaussianCount(File dataset) {
+        JSONObject result = readResult(dataset);
+        return result == null ? 0 : result.optInt("textured_gaussian_count", 0);
     }
 
     private static JSONObject readResult(File dataset) {
