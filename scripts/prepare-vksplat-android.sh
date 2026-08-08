@@ -127,6 +127,16 @@ replacement = '''      #if 0
 if needle not in s:
     raise SystemExit('VkSplat image factor patch anchor not found')
 s = s.replace(needle, replacement, 1)
+# Desktop VkSplat loads images using all CPU threads. On a phone this creates a large transient
+# RGBA decode spike exactly when Vulkan allocates its training buffers. Keep Android image loading
+# bounded to two workers; this changes only preprocessing concurrency, not training resolution or loss.
+threads = '    const unsigned int numThreads = std::thread::hardware_concurrency();\n'
+threads_android = '''    const unsigned int numThreads = std::min(
+        2u, std::max(1u, std::thread::hardware_concurrency()));
+'''
+if threads not in s:
+    raise SystemExit('VkSplat image loader thread-count patch anchor not found')
+s = s.replace(threads, threads_android, 1)
 p.write_text(s)
 PY
 
