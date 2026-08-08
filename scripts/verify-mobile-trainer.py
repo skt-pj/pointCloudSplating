@@ -85,14 +85,15 @@ def main() -> None:
     if not m or int(m.group(1).replace("_", "")) > 1000:
         raise SystemExit("mobile trainer architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
 
+    # The patch file necessarily contains both the old and new text as replacement anchors. Validate
+    # that the intended subgroup-16 correction is present here, and validate absence only after the
+    # patch has been applied to the vendored source below.
     require(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
-            "renderer cumsum block must be subgroup squared")
-    forbid(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
-           "renderer cumsum block must not use subgroup cubed")
+            "renderer cumsum block replacement must use subgroup squared")
     require(patch, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
-            "shader cumsum block must be subgroup squared")
+            "shader cumsum block replacement must use subgroup squared")
     require(patch, "if (laneId >= offset) {",
-            "subgroup scan must not read a negative predecessor lane")
+            "subgroup scan replacement must not read a negative predecessor lane")
     require(patch, "num_blocks", "two-level cumsum must use reduced block count")
     require(patch, "level1_uniforms", "three-level cumsum level 1 must use reduced count")
     require(patch, "level2_uniforms", "three-level cumsum level 2 must use reduced count")
