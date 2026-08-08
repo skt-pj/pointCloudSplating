@@ -11,6 +11,8 @@ import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -37,6 +39,7 @@ public final class GaussianViewerActivity extends Activity {
     private GLSurfaceView glView;
     private GaussianRenderer renderer;
     private TextView statusView;
+    private TextView sizeLabel;
     private ScaleGestureDetector scaleDetector;
     private float lastX;
     private float lastY;
@@ -50,8 +53,7 @@ public final class GaussianViewerActivity extends Activity {
             finish();
             return;
         }
-        File dataset = new File(datasetPath);
-        File splat = new File(dataset, "splat.ply");
+        File splat = new File(new File(datasetPath), "splat.ply");
         if (!splat.isFile()) {
             Toast.makeText(this, "3Dモデルを開けませんでした。", Toast.LENGTH_LONG).show();
             finish();
@@ -87,31 +89,71 @@ public final class GaussianViewerActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
-        LinearOverlay overlay = new LinearOverlay(this);
-        overlay.button("戻る", "保存したスキャンに戻る", v -> finish());
-        statusView = overlay.status();
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setBackgroundColor(0x77000000);
+        Button back = makeButton("戻る", "保存したスキャンに戻る", v -> finish(), 86);
+        top.addView(back);
+        statusView = new TextView(this);
+        statusView.setTextColor(0xFFFFFFFF);
+        statusView.setTextSize(13f);
+        statusView.setGravity(Gravity.CENTER);
         statusView.setText("3Dモデルを読み込んでいます…\n少しお待ちください");
-        overlay.button("正面に戻す", "3Dモデルの向きと大きさを元に戻す",
-                v -> renderer.resetCamera());
-
+        top.addView(statusView, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        Button reset = makeButton("正面に戻す", "3Dモデルの向きと大きさを元に戻す",
+                v -> renderer.resetCamera(), 128);
+        top.addView(reset);
         FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, dp(64));
         topParams.gravity = Gravity.TOP;
         topParams.leftMargin = dp(6);
         topParams.rightMargin = dp(6);
         topParams.topMargin = dp(6);
-        root.addView(overlay.root, topParams);
+        root.addView(top, topParams);
 
-        TextView title = new TextView(this);
-        title.setText("3Dモデル");
-        title.setTextColor(0xFFFFFFFF);
-        title.setTextSize(14f);
-        title.setGravity(Gravity.CENTER_HORIZONTAL);
-        title.setBackgroundColor(0x66000000);
-        FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, dp(32));
-        titleParams.gravity = Gravity.BOTTOM;
-        root.addView(title, titleParams);
+        LinearLayout sizePanel = new LinearLayout(this);
+        sizePanel.setOrientation(LinearLayout.VERTICAL);
+        sizePanel.setGravity(Gravity.CENTER_VERTICAL);
+        sizePanel.setPadding(dp(16), dp(4), dp(16), dp(4));
+        sizePanel.setBackgroundColor(0x99000000);
+        sizeLabel = new TextView(this);
+        sizeLabel.setTextColor(0xFFFFFFFF);
+        sizeLabel.setTextSize(14f);
+        sizeLabel.setText("表示サイズ: 最小");
+        sizePanel.addView(sizeLabel, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(24)));
+        SeekBar sizeSlider = new SeekBar(this);
+        sizeSlider.setMax(100);
+        sizeSlider.setProgress(0);
+        sizeSlider.setMinHeight(dp(48));
+        sizeSlider.setContentDescription("3Dモデルの表示サイズ");
+        sizeSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                renderer.setDisplaySizeProgress(progress);
+                if (progress == 0) {
+                    sizeLabel.setText("表示サイズ: 最小");
+                } else if (progress == 100) {
+                    sizeLabel.setText("表示サイズ: 最大");
+                } else {
+                    sizeLabel.setText("表示サイズ: " + progress + "%");
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        sizePanel.addView(sizeSlider, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+        FrameLayout.LayoutParams sizeParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(80));
+        sizeParams.gravity = Gravity.BOTTOM;
+        sizeParams.leftMargin = dp(8);
+        sizeParams.rightMargin = dp(8);
+        sizeParams.bottomMargin = dp(8);
+        root.addView(sizePanel, sizeParams);
 
         setContentView(root);
         loadModelAsync(splat);
@@ -120,17 +162,25 @@ public final class GaussianViewerActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (glView != null) {
-            glView.onResume();
-        }
+        if (glView != null) glView.onResume();
     }
 
     @Override
     protected void onPause() {
-        if (glView != null) {
-            glView.onPause();
-        }
+        if (glView != null) glView.onPause();
         super.onPause();
+    }
+
+    private Button makeButton(String text, String description, View.OnClickListener listener, int widthDp) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setAllCaps(false);
+        button.setContentDescription(description);
+        button.setMinHeight(dp(48));
+        button.setOnClickListener(listener);
+        button.setLayoutParams(new LinearLayout.LayoutParams(dp(widthDp),
+                LinearLayout.LayoutParams.MATCH_PARENT));
+        return button;
     }
 
     private void loadModelAsync(File splat) {
@@ -144,9 +194,7 @@ public final class GaussianViewerActivity extends Activity {
                 DiagnosticLog.e("GaussianViewer", "Failed to load splat.ply", e);
                 runOnUiThread(() -> {
                     statusView.setText("3Dモデルを表示できませんでした");
-                    Toast.makeText(this,
-                            "3Dモデルを表示できませんでした。",
-                            Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "3Dモデルを表示できませんでした。", Toast.LENGTH_LONG).show();
                 });
             }
         }, "LoadGaussianPly").start();
@@ -155,22 +203,15 @@ public final class GaussianViewerActivity extends Activity {
     private boolean handleTouch(View view, MotionEvent event) {
         scaleDetector.onTouchEvent(event);
         if (event.getPointerCount() == 1 && !scaleDetector.isInProgress()) {
-            switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    lastX = event.getX();
-                    lastY = event.getY();
-                    return true;
-                case MotionEvent.ACTION_MOVE:
-                    float x = event.getX();
-                    float y = event.getY();
-                    float dx = x - lastX;
-                    float dy = y - lastY;
-                    lastX = x;
-                    lastY = y;
-                    renderer.rotate(dx * 0.35f, dy * 0.35f);
-                    return true;
-                default:
-                    break;
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                lastX = event.getX();
+                lastY = event.getY();
+            } else if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+                float x = event.getX();
+                float y = event.getY();
+                renderer.rotate((x - lastX) * 0.35f, (y - lastY) * 0.35f);
+                lastX = x;
+                lastY = y;
             }
         }
         return true;
@@ -184,64 +225,43 @@ public final class GaussianViewerActivity extends Activity {
         void onStatus(String message);
     }
 
-    private static final class LinearOverlay {
-        final android.widget.LinearLayout root;
-        private final Activity activity;
-
-        LinearOverlay(Activity activity) {
-            this.activity = activity;
-            root = new android.widget.LinearLayout(activity);
-            root.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-            root.setGravity(Gravity.CENTER_VERTICAL);
-            root.setBackgroundColor(0x77000000);
-        }
-
-        Button button(String text, String contentDescription, View.OnClickListener listener) {
-            Button button = new Button(activity);
-            button.setText(text);
-            button.setAllCaps(false);
-            button.setContentDescription(contentDescription);
-            button.setMinHeight(Math.round(48 * activity.getResources().getDisplayMetrics().density));
-            button.setOnClickListener(listener);
-            int widthDp = "正面に戻す".equals(text) ? 128 : 86;
-            root.addView(button, new android.widget.LinearLayout.LayoutParams(
-                    Math.round(widthDp * activity.getResources().getDisplayMetrics().density),
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT));
-            return button;
-        }
-
-        TextView status() {
-            TextView status = new TextView(activity);
-            status.setTextColor(0xFFFFFFFF);
-            status.setTextSize(13f);
-            status.setGravity(Gravity.CENTER);
-            root.addView(status, new android.widget.LinearLayout.LayoutParams(
-                    0, android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-            return status;
-        }
-    }
-
     private static final class GaussianRenderer implements GLSurfaceView.Renderer {
         private static final String TAG = "GaussianViewer";
+        private static final float MIN_DISPLAY_SCALE = 0.08f;
+        private static final float MAX_DISPLAY_SCALE = 4.0f;
         private static final String VERTEX_SHADER =
                 "attribute vec3 a_Position;\n"
-                        + "attribute vec4 a_Color;\n"
+                        + "attribute vec4 a_DcAlpha;\n"
+                        + "attribute vec3 a_ShR;\n"
+                        + "attribute vec3 a_ShG;\n"
+                        + "attribute vec3 a_ShB;\n"
                         + "attribute float a_Size;\n"
                         + "attribute vec2 a_Corner;\n"
                         + "uniform mat4 u_View;\n"
                         + "uniform mat4 u_Projection;\n"
                         + "uniform vec3 u_Center;\n"
                         + "uniform float u_Radius;\n"
+                        + "uniform vec3 u_Camera;\n"
+                        + "uniform float u_SizeScale;\n"
                         + "varying vec4 v_Color;\n"
                         + "varying vec2 v_Corner;\n"
                         + "void main() {\n"
                         + "  float radius = max(u_Radius, 0.0001);\n"
-                        + "  vec3 normalizedPosition = (a_Position - u_Center) / radius;\n"
-                        + "  vec4 viewCenter = u_View * vec4(normalizedPosition, 1.0);\n"
-                        + "  float normalizedSize = clamp((a_Size / radius) * 2.8, 0.006, 0.10);\n"
-                        + "  vec4 viewPosition = viewCenter + vec4(a_Corner * normalizedSize, 0.0, 0.0);\n"
+                        + "  vec3 p = (a_Position - u_Center) / radius;\n"
+                        + "  vec3 d = normalize(p - u_Camera);\n"
+                        + "  float c0 = 0.2820947918;\n"
+                        + "  float c1 = 0.4886025119;\n"
+                        + "  vec3 basis = vec3(-c1*d.y, c1*d.z, -c1*d.x);\n"
+                        + "  vec3 rgb = vec3(\n"
+                        + "    0.5 + c0*a_DcAlpha.r + dot(a_ShR, basis),\n"
+                        + "    0.5 + c0*a_DcAlpha.g + dot(a_ShG, basis),\n"
+                        + "    0.5 + c0*a_DcAlpha.b + dot(a_ShB, basis));\n"
+                        + "  rgb = clamp(rgb, 0.0, 1.0);\n"
+                        + "  vec4 viewCenter = u_View * vec4(p, 1.0);\n"
+                        + "  float size = clamp((a_Size / radius) * 2.0 * u_SizeScale, 0.0008, 0.08);\n"
+                        + "  vec4 viewPosition = viewCenter + vec4(a_Corner * size, 0.0, 0.0);\n"
                         + "  gl_Position = u_Projection * viewPosition;\n"
-                        + "  v_Color = a_Color;\n"
+                        + "  v_Color = vec4(rgb, clamp(a_DcAlpha.a, 0.02, 0.98));\n"
                         + "  v_Corner = a_Corner;\n"
                         + "}\n";
 
@@ -252,8 +272,9 @@ public final class GaussianViewerActivity extends Activity {
                         + "void main() {\n"
                         + "  float r2 = dot(v_Corner, v_Corner);\n"
                         + "  if (r2 > 1.0) discard;\n"
-                        + "  float weight = exp(-2.4 * r2);\n"
-                        + "  float alpha = max(0.42, v_Color.a) * weight;\n"
+                        + "  float weight = exp(-3.0 * r2);\n"
+                        + "  float alpha = v_Color.a * weight;\n"
+                        + "  if (alpha < 0.004) discard;\n"
                         + "  gl_FragColor = vec4(v_Color.rgb, alpha);\n"
                         + "}\n";
 
@@ -261,19 +282,25 @@ public final class GaussianViewerActivity extends Activity {
         private volatile ModelData model;
         private int program;
         private int positionLocation;
-        private int colorLocation;
+        private int dcAlphaLocation;
+        private int shRLocation;
+        private int shGLocation;
+        private int shBLocation;
         private int sizeLocation;
         private int cornerLocation;
         private int viewLocation;
         private int projectionLocation;
         private int centerLocation;
         private int radiusLocation;
+        private int cameraLocation;
+        private int sizeScaleLocation;
         private int width = 1;
         private int height = 1;
         private float yawDegrees;
         private float pitchDegrees = -10f;
         private float distance = 2.8f;
         private float baseDistance = 2.8f;
+        private float displayScale = MIN_DISPLAY_SCALE;
         private boolean firstDrawReported;
         private boolean drawErrorReported;
 
@@ -298,14 +325,18 @@ public final class GaussianViewerActivity extends Activity {
                             + GLES20.glGetProgramInfoLog(program));
                 }
                 positionLocation = requireAttribute("a_Position");
-                colorLocation = requireAttribute("a_Color");
+                dcAlphaLocation = requireAttribute("a_DcAlpha");
+                shRLocation = requireAttribute("a_ShR");
+                shGLocation = requireAttribute("a_ShG");
+                shBLocation = requireAttribute("a_ShB");
                 sizeLocation = requireAttribute("a_Size");
                 cornerLocation = requireAttribute("a_Corner");
                 viewLocation = requireUniform("u_View");
                 projectionLocation = requireUniform("u_Projection");
                 centerLocation = requireUniform("u_Center");
                 radiusLocation = requireUniform("u_Radius");
-
+                cameraLocation = requireUniform("u_Camera");
+                sizeScaleLocation = requireUniform("u_SizeScale");
                 GLES20.glEnable(GLES20.GL_BLEND);
                 GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
                 GLES20.glEnable(GLES20.GL_DEPTH_TEST);
@@ -314,12 +345,12 @@ public final class GaussianViewerActivity extends Activity {
                 DiagnosticLog.i(TAG,
                         "GL ready renderer=" + GLES20.glGetString(GLES20.GL_RENDERER)
                                 + " version=" + GLES20.glGetString(GLES20.GL_VERSION)
-                                + " vendor=" + GLES20.glGetString(GLES20.GL_VENDOR));
+                                + " vendor=" + GLES20.glGetString(GLES20.GL_VENDOR)
+                                + " viewerAppearance=JPEG_SH1");
             } catch (RuntimeException e) {
                 program = 0;
                 DiagnosticLog.e(TAG, "Viewer GL initialization failed", e);
-                statusListener.onStatus(
-                        "3D表示を初期化できませんでした\n戻ってログをコピーしてください");
+                statusListener.onStatus("3D表示を初期化できませんでした\n戻ってログをコピーしてください");
             }
         }
 
@@ -335,19 +366,18 @@ public final class GaussianViewerActivity extends Activity {
         public void onDrawFrame(GL10 gl) {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
             ModelData current = model;
-            if (current == null || current.vertexCount == 0 || program == 0) {
-                return;
-            }
+            if (current == null || current.vertexCount == 0 || program == 0) return;
 
             float yaw;
             float pitch;
             float cameraDistance;
+            float sizeScale;
             synchronized (this) {
                 yaw = yawDegrees;
                 pitch = pitchDegrees;
                 cameraDistance = distance;
+                sizeScale = displayScale;
             }
-
             float yawRad = (float) Math.toRadians(yaw);
             float pitchRad = (float) Math.toRadians(pitch);
             float cosPitch = (float) Math.cos(pitchRad);
@@ -357,41 +387,37 @@ public final class GaussianViewerActivity extends Activity {
 
             float[] view = new float[16];
             float[] projection = new float[16];
-            Matrix.setLookAtM(view, 0,
-                    eyeX, eyeY, eyeZ,
-                    0f, 0f, 0f,
-                    0f, 1f, 0f);
-            float aspect = (float) width / (float) height;
-            Matrix.perspectiveM(projection, 0, 55f, aspect, 0.05f, 30f);
+            Matrix.setLookAtM(view, 0, eyeX, eyeY, eyeZ, 0f, 0f, 0f, 0f, 1f, 0f);
+            Matrix.perspectiveM(projection, 0, 55f, (float) width / (float) height, 0.05f, 30f);
 
             GLES20.glUseProgram(program);
             GLES20.glUniformMatrix4fv(viewLocation, 1, false, view, 0);
             GLES20.glUniformMatrix4fv(projectionLocation, 1, false, projection, 0);
-            GLES20.glUniform3f(centerLocation,
-                    current.centerX, current.centerY, current.centerZ);
+            GLES20.glUniform3f(centerLocation, current.centerX, current.centerY, current.centerZ);
             GLES20.glUniform1f(radiusLocation, current.radius);
+            GLES20.glUniform3f(cameraLocation, eyeX, eyeY, eyeZ);
+            GLES20.glUniform1f(sizeScaleLocation, sizeScale);
 
             current.positions.position(0);
-            current.colors.position(0);
+            current.dcAlpha.position(0);
+            current.shR.position(0);
+            current.shG.position(0);
+            current.shB.position(0);
             current.sizes.position(0);
             current.corners.position(0);
-            GLES20.glEnableVertexAttribArray(positionLocation);
-            GLES20.glVertexAttribPointer(positionLocation, 3, GLES20.GL_FLOAT,
-                    false, 3 * Float.BYTES, current.positions);
-            GLES20.glEnableVertexAttribArray(colorLocation);
-            GLES20.glVertexAttribPointer(colorLocation, 4, GLES20.GL_FLOAT,
-                    false, 4 * Float.BYTES, current.colors);
-            GLES20.glEnableVertexAttribArray(sizeLocation);
-            GLES20.glVertexAttribPointer(sizeLocation, 1, GLES20.GL_FLOAT,
-                    false, Float.BYTES, current.sizes);
-            GLES20.glEnableVertexAttribArray(cornerLocation);
-            GLES20.glVertexAttribPointer(cornerLocation, 2, GLES20.GL_FLOAT,
-                    false, 2 * Float.BYTES, current.corners);
-
+            bind(positionLocation, 3, current.positions);
+            bind(dcAlphaLocation, 4, current.dcAlpha);
+            bind(shRLocation, 3, current.shR);
+            bind(shGLocation, 3, current.shG);
+            bind(shBLocation, 3, current.shB);
+            bind(sizeLocation, 1, current.sizes);
+            bind(cornerLocation, 2, current.corners);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, current.vertexCount);
-
             GLES20.glDisableVertexAttribArray(positionLocation);
-            GLES20.glDisableVertexAttribArray(colorLocation);
+            GLES20.glDisableVertexAttribArray(dcAlphaLocation);
+            GLES20.glDisableVertexAttribArray(shRLocation);
+            GLES20.glDisableVertexAttribArray(shGLocation);
+            GLES20.glDisableVertexAttribArray(shBLocation);
             GLES20.glDisableVertexAttribArray(sizeLocation);
             GLES20.glDisableVertexAttribArray(cornerLocation);
 
@@ -399,22 +425,25 @@ public final class GaussianViewerActivity extends Activity {
             if (error != GLES20.GL_NO_ERROR) {
                 if (!drawErrorReported) {
                     drawErrorReported = true;
-                    DiagnosticLog.e(TAG, "Viewer draw failed glError=0x"
-                            + Integer.toHexString(error));
-                    statusListener.onStatus(
-                            "3Dモデルを描画できませんでした\n戻ってログをコピーしてください");
+                    DiagnosticLog.e(TAG, "Viewer draw failed glError=0x" + Integer.toHexString(error));
+                    statusListener.onStatus("3Dモデルを描画できませんでした\n戻ってログをコピーしてください");
                 }
                 return;
             }
             if (!firstDrawReported) {
                 firstDrawReported = true;
                 DiagnosticLog.i(TAG,
-                        "First model draw succeeded gaussians=" + current.gaussianCount
-                                + " triangles=" + (current.vertexCount / 3)
-                                + " radius=" + current.radius);
-                statusListener.onStatus(
-                        "3Dモデルを表示中\nドラッグで回転 / ピンチで拡大・縮小");
+                        String.format(Locale.US,
+                                "First model draw succeeded gaussians=%d triangles=%d radius=%.4f sizeScale=%.3f appearance=JPEG_SH1",
+                                current.gaussianCount, current.vertexCount / 3, current.radius, sizeScale));
+                statusListener.onStatus("3Dモデルを表示中\nドラッグで回転 / ピンチで拡大・縮小");
             }
+        }
+
+        private void bind(int location, int size, FloatBuffer buffer) {
+            GLES20.glEnableVertexAttribArray(location);
+            GLES20.glVertexAttribPointer(location, size, GLES20.GL_FLOAT,
+                    false, size * Float.BYTES, buffer);
         }
 
         void setModel(ModelData model) {
@@ -429,15 +458,19 @@ public final class GaussianViewerActivity extends Activity {
             }
         }
 
+        synchronized void setDisplaySizeProgress(int progress) {
+            float t = Math.max(0f, Math.min(1f, progress / 100f));
+            displayScale = MIN_DISPLAY_SCALE
+                    * (float) Math.pow(MAX_DISPLAY_SCALE / MIN_DISPLAY_SCALE, t);
+        }
+
         synchronized void rotate(float dxDegrees, float dyDegrees) {
             yawDegrees = (yawDegrees - dxDegrees) % 360f;
             pitchDegrees = Math.max(-85f, Math.min(85f, pitchDegrees - dyDegrees));
         }
 
         synchronized void zoom(float scaleFactor) {
-            if (model == null || !Float.isFinite(scaleFactor) || scaleFactor <= 0f) {
-                return;
-            }
+            if (model == null || !Float.isFinite(scaleFactor) || scaleFactor <= 0f) return;
             distance /= scaleFactor;
             distance = Math.max(0.8f, Math.min(12f, distance));
         }
@@ -450,17 +483,13 @@ public final class GaussianViewerActivity extends Activity {
 
         private int requireAttribute(String name) {
             int location = GLES20.glGetAttribLocation(program, name);
-            if (location < 0) {
-                throw new IllegalStateException("missing viewer attribute " + name);
-            }
+            if (location < 0) throw new IllegalStateException("missing viewer attribute " + name);
             return location;
         }
 
         private int requireUniform(String name) {
             int location = GLES20.glGetUniformLocation(program, name);
-            if (location < 0) {
-                throw new IllegalStateException("missing viewer uniform " + name);
-            }
+            if (location < 0) throw new IllegalStateException("missing viewer uniform " + name);
             return location;
         }
 
@@ -483,7 +512,10 @@ public final class GaussianViewerActivity extends Activity {
         final int gaussianCount;
         final int vertexCount;
         final FloatBuffer positions;
-        final FloatBuffer colors;
+        final FloatBuffer dcAlpha;
+        final FloatBuffer shR;
+        final FloatBuffer shG;
+        final FloatBuffer shB;
         final FloatBuffer sizes;
         final FloatBuffer corners;
         final float centerX;
@@ -491,21 +523,18 @@ public final class GaussianViewerActivity extends Activity {
         final float centerZ;
         final float radius;
 
-        ModelData(
-                int gaussianCount,
-                int vertexCount,
-                FloatBuffer positions,
-                FloatBuffer colors,
-                FloatBuffer sizes,
-                FloatBuffer corners,
-                float centerX,
-                float centerY,
-                float centerZ,
-                float radius) {
+        ModelData(int gaussianCount, int vertexCount,
+                  FloatBuffer positions, FloatBuffer dcAlpha,
+                  FloatBuffer shR, FloatBuffer shG, FloatBuffer shB,
+                  FloatBuffer sizes, FloatBuffer corners,
+                  float centerX, float centerY, float centerZ, float radius) {
             this.gaussianCount = gaussianCount;
             this.vertexCount = vertexCount;
             this.positions = positions;
-            this.colors = colors;
+            this.dcAlpha = dcAlpha;
+            this.shR = shR;
+            this.shG = shG;
+            this.shB = shB;
             this.sizes = sizes;
             this.corners = corners;
             this.centerX = centerX;
@@ -517,7 +546,6 @@ public final class GaussianViewerActivity extends Activity {
 
     private static final class GaussianPlyReader {
         private static final String TAG = "GaussianViewer";
-        private static final float SH_C0 = 0.28209479177387814f;
         private static final int ROBUST_SAMPLE_LIMIT = 8192;
         private static final float[] QUAD_CORNERS = {
                 -1f, -1f, 1f, -1f, 1f, 1f,
@@ -527,29 +555,31 @@ public final class GaussianViewerActivity extends Activity {
         static ModelData read(File file) throws IOException {
             try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
                 Header header = readHeader(input);
-                if (!header.binaryLittleEndian) {
-                    throw new IOException("binary_little_endian PLY only");
+                if (!header.binaryLittleEndian || header.vertexCount <= 0) {
+                    throw new IOException("invalid Gaussian PLY");
                 }
-                if (header.vertexCount <= 0) {
-                    throw new IOException("PLY has no vertices");
-                }
-                int xIndex = header.indexOf("x");
-                int yIndex = header.indexOf("y");
-                int zIndex = header.indexOf("z");
-                if (xIndex < 0 || yIndex < 0 || zIndex < 0) {
-                    throw new IOException("PLY position properties are missing");
-                }
-                int rIndex = header.indexOf("f_dc_0");
-                int gIndex = header.indexOf("f_dc_1");
-                int bIndex = header.indexOf("f_dc_2");
-                int opacityIndex = header.indexOf("opacity");
-                int sxIndex = header.indexOf("scale_0");
-                int syIndex = header.indexOf("scale_1");
-                int szIndex = header.indexOf("scale_2");
+                int xIndex = require(header, "x");
+                int yIndex = require(header, "y");
+                int zIndex = require(header, "z");
+                int dcR = require(header, "f_dc_0");
+                int dcG = require(header, "f_dc_1");
+                int dcB = require(header, "f_dc_2");
+                int opacityIndex = require(header, "opacity");
+                int sxIndex = require(header, "scale_0");
+                int syIndex = require(header, "scale_1");
+                int szIndex = require(header, "scale_2");
+                int r1 = header.indexOf("f_rest_0");
+                int r2 = header.indexOf("f_rest_1");
+                int r3 = header.indexOf("f_rest_2");
+                int g1 = header.indexOf("f_rest_15");
+                int g2 = header.indexOf("f_rest_16");
+                int g3 = header.indexOf("f_rest_17");
+                int b1 = header.indexOf("f_rest_30");
+                int b2 = header.indexOf("f_rest_31");
+                int b3 = header.indexOf("f_rest_32");
 
                 long bodyBytes = (long) header.vertexCount * header.properties.size() * Float.BYTES;
-                long available = file.length() - header.bodyOffset;
-                if (available < bodyBytes) {
+                if (file.length() - header.bodyOffset < bodyBytes) {
                     throw new IOException("truncated splat.ply");
                 }
                 MappedByteBuffer body = input.getChannel().map(
@@ -557,177 +587,143 @@ public final class GaussianViewerActivity extends Activity {
                 body.order(ByteOrder.LITTLE_ENDIAN);
 
                 float[] xyz = new float[header.vertexCount * 3];
-                float[] rgba = new float[header.vertexCount * 4];
-                float[] scales = new float[header.vertexCount];
+                float[] dc = new float[header.vertexCount * 3];
+                float[] sh1 = new float[header.vertexCount * 9];
+                float[] alpha = new float[header.vertexCount];
+                float[] scale = new float[header.vertexCount];
                 boolean[] valid = new boolean[header.vertexCount];
                 float[] values = new float[header.properties.size()];
                 int validCount = 0;
-                int invalidColorCount = 0;
-                float minScale = Float.POSITIVE_INFINITY;
-                float maxScale = 0f;
-
+                int sh1Count = 0;
                 for (int i = 0; i < header.vertexCount; i++) {
-                    for (int p = 0; p < values.length; p++) {
-                        values[p] = body.getFloat();
-                    }
+                    for (int p = 0; p < values.length; p++) values[p] = body.getFloat();
                     float x = values[xIndex];
                     float y = values[yIndex];
                     float z = values[zIndex];
-                    if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) {
-                        continue;
-                    }
+                    if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) continue;
                     valid[i] = true;
                     validCount++;
                     xyz[i * 3] = x;
                     xyz[i * 3 + 1] = y;
                     xyz[i * 3 + 2] = z;
-
-                    float red = rIndex >= 0 ? 0.5f + SH_C0 * values[rIndex] : 0.75f;
-                    float green = gIndex >= 0 ? 0.5f + SH_C0 * values[gIndex] : 0.75f;
-                    float blue = bIndex >= 0 ? 0.5f + SH_C0 * values[bIndex] : 0.75f;
-                    if (!Float.isFinite(red) || !Float.isFinite(green) || !Float.isFinite(blue)) {
-                        invalidColorCount++;
-                        red = green = blue = 0.75f;
+                    dc[i * 3] = finiteOrZero(values[dcR]);
+                    dc[i * 3 + 1] = finiteOrZero(values[dcG]);
+                    dc[i * 3 + 2] = finiteOrZero(values[dcB]);
+                    int s = i * 9;
+                    sh1[s] = valueAt(values, r1);
+                    sh1[s + 1] = valueAt(values, r2);
+                    sh1[s + 2] = valueAt(values, r3);
+                    sh1[s + 3] = valueAt(values, g1);
+                    sh1[s + 4] = valueAt(values, g2);
+                    sh1[s + 5] = valueAt(values, g3);
+                    sh1[s + 6] = valueAt(values, b1);
+                    sh1[s + 7] = valueAt(values, b2);
+                    sh1[s + 8] = valueAt(values, b3);
+                    if (Math.abs(sh1[s]) + Math.abs(sh1[s + 1]) + Math.abs(sh1[s + 2])
+                            + Math.abs(sh1[s + 3]) + Math.abs(sh1[s + 4]) + Math.abs(sh1[s + 5])
+                            + Math.abs(sh1[s + 6]) + Math.abs(sh1[s + 7]) + Math.abs(sh1[s + 8]) > 1e-7f) {
+                        sh1Count++;
                     }
-                    float opacityValue = opacityIndex >= 0 ? values[opacityIndex] : 6f;
-                    float alpha = Float.isFinite(opacityValue) ? sigmoid(opacityValue) : 0.8f;
-                    rgba[i * 4] = clamp01(red);
-                    rgba[i * 4 + 1] = clamp01(green);
-                    rgba[i * 4 + 2] = clamp01(blue);
-                    rgba[i * 4 + 3] = Math.max(0.35f, clamp01(alpha));
-
-                    float worldScale = 0.012f;
-                    if (sxIndex >= 0 && syIndex >= 0 && szIndex >= 0
-                            && Float.isFinite(values[sxIndex])
-                            && Float.isFinite(values[syIndex])
-                            && Float.isFinite(values[szIndex])) {
-                        float sx = safeExp(values[sxIndex]);
-                        float sy = safeExp(values[syIndex]);
-                        float sz = safeExp(values[szIndex]);
-                        float product = sx * sy * sz;
-                        if (Float.isFinite(product) && product > 0f) {
-                            worldScale = (float) Math.cbrt(product) * 2.4f;
-                        }
-                    }
-                    if (!Float.isFinite(worldScale) || worldScale <= 0f) {
-                        worldScale = 0.012f;
-                    }
-                    worldScale = Math.max(0.0025f, Math.min(0.14f, worldScale));
-                    scales[i] = worldScale;
-                    minScale = Math.min(minScale, worldScale);
-                    maxScale = Math.max(maxScale, worldScale);
+                    alpha[i] = sigmoid(values[opacityIndex]);
+                    float sx = safeExp(values[sxIndex]);
+                    float sy = safeExp(values[syIndex]);
+                    float sz = safeExp(values[szIndex]);
+                    float product = sx * sy * sz;
+                    float worldScale = Float.isFinite(product) && product > 0f
+                            ? (float) Math.cbrt(product) : 0.008f;
+                    scale[i] = Math.max(0.001f, Math.min(0.06f, worldScale));
                 }
+                if (validCount == 0) throw new IOException("PLY has no finite positions");
 
-                if (validCount == 0) {
-                    throw new IOException("PLY has no finite positions");
-                }
-
-                int sampleStride = Math.max(1, validCount / ROBUST_SAMPLE_LIMIT);
-                int sampleCapacity = Math.min(validCount,
-                        (validCount + sampleStride - 1) / sampleStride + 1);
-                float[] sampleX = new float[sampleCapacity];
-                float[] sampleY = new float[sampleCapacity];
-                float[] sampleZ = new float[sampleCapacity];
-                int sampleCount = 0;
-                int seenValid = 0;
-                for (int i = 0; i < header.vertexCount && sampleCount < sampleCapacity; i++) {
-                    if (!valid[i]) {
-                        continue;
-                    }
-                    if (seenValid % sampleStride == 0) {
-                        sampleX[sampleCount] = xyz[i * 3];
-                        sampleY[sampleCount] = xyz[i * 3 + 1];
-                        sampleZ[sampleCount] = xyz[i * 3 + 2];
-                        sampleCount++;
-                    }
-                    seenValid++;
-                }
-
-                float[] medianX = Arrays.copyOf(sampleX, sampleCount);
-                float[] medianY = Arrays.copyOf(sampleY, sampleCount);
-                float[] medianZ = Arrays.copyOf(sampleZ, sampleCount);
-                Arrays.sort(medianX);
-                Arrays.sort(medianY);
-                Arrays.sort(medianZ);
-                float centerX = medianX[sampleCount / 2];
-                float centerY = medianY[sampleCount / 2];
-                float centerZ = medianZ[sampleCount / 2];
-
-                float[] distances = new float[sampleCount];
-                for (int i = 0; i < sampleCount; i++) {
-                    float dx = sampleX[i] - centerX;
-                    float dy = sampleY[i] - centerY;
-                    float dz = sampleZ[i] - centerZ;
-                    distances[i] = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-                }
-                Arrays.sort(distances);
-                int percentileIndex = Math.min(sampleCount - 1,
-                        Math.max(0, Math.round((sampleCount - 1) * 0.99f)));
-                float radius = Math.max(0.05f, distances[percentileIndex] * 1.12f);
-                if (!Float.isFinite(radius) || radius <= 0f) {
-                    radius = 1f;
-                }
-
-                int expandedVertexCount = validCount * 6;
-                FloatBuffer positions = directFloats(expandedVertexCount * 3);
-                FloatBuffer colors = directFloats(expandedVertexCount * 4);
-                FloatBuffer sizes = directFloats(expandedVertexCount);
-                FloatBuffer corners = directFloats(expandedVertexCount * 2);
+                float[] centerRadius = robustCenterRadius(xyz, valid, validCount);
+                float centerX = centerRadius[0];
+                float centerY = centerRadius[1];
+                float centerZ = centerRadius[2];
+                float radius = centerRadius[3];
+                int vertexCount = validCount * 6;
+                FloatBuffer positions = directFloats(vertexCount * 3);
+                FloatBuffer dcAlpha = directFloats(vertexCount * 4);
+                FloatBuffer shR = directFloats(vertexCount * 3);
+                FloatBuffer shG = directFloats(vertexCount * 3);
+                FloatBuffer shB = directFloats(vertexCount * 3);
+                FloatBuffer sizes = directFloats(vertexCount);
+                FloatBuffer corners = directFloats(vertexCount * 2);
                 for (int i = 0; i < header.vertexCount; i++) {
-                    if (!valid[i]) {
-                        continue;
-                    }
-                    float x = xyz[i * 3];
-                    float y = xyz[i * 3 + 1];
-                    float z = xyz[i * 3 + 2];
-                    float red = rgba[i * 4];
-                    float green = rgba[i * 4 + 1];
-                    float blue = rgba[i * 4 + 2];
-                    float alpha = rgba[i * 4 + 3];
+                    if (!valid[i]) continue;
+                    int p = i * 3;
+                    int s = i * 9;
                     for (int v = 0; v < 6; v++) {
-                        positions.put(x).put(y).put(z);
-                        colors.put(red).put(green).put(blue).put(alpha);
-                        sizes.put(scales[i]);
+                        positions.put(xyz[p]).put(xyz[p + 1]).put(xyz[p + 2]);
+                        dcAlpha.put(dc[p]).put(dc[p + 1]).put(dc[p + 2])
+                                .put(Math.max(0.02f, Math.min(0.98f, alpha[i])));
+                        shR.put(sh1[s]).put(sh1[s + 1]).put(sh1[s + 2]);
+                        shG.put(sh1[s + 3]).put(sh1[s + 4]).put(sh1[s + 5]);
+                        shB.put(sh1[s + 6]).put(sh1[s + 7]).put(sh1[s + 8]);
+                        sizes.put(scale[i]);
                         corners.put(QUAD_CORNERS[v * 2]).put(QUAD_CORNERS[v * 2 + 1]);
                     }
                 }
                 positions.position(0);
-                colors.position(0);
+                dcAlpha.position(0);
+                shR.position(0);
+                shG.position(0);
+                shB.position(0);
                 sizes.position(0);
                 corners.position(0);
-
                 DiagnosticLog.i(TAG,
                         String.format(Locale.US,
-                                "Loaded model gaussians=%d/%d robustCenter=(%.3f,%.3f,%.3f) radius99=%.3f scale=%.5f..%.5f invalidColors=%d",
-                                validCount,
-                                header.vertexCount,
-                                centerX,
-                                centerY,
-                                centerZ,
-                                radius,
-                                minScale,
-                                maxScale,
-                                invalidColorCount));
-                return new ModelData(
-                        validCount,
-                        expandedVertexCount,
-                        positions,
-                        colors,
-                        sizes,
-                        corners,
-                        centerX,
-                        centerY,
-                        centerZ,
-                        radius);
+                                "Loaded model gaussians=%d/%d robustCenter=(%.3f,%.3f,%.3f) radius99=%.3f sh1=%d appearance=JPEG_SH1",
+                                validCount, header.vertexCount, centerX, centerY, centerZ, radius, sh1Count));
+                return new ModelData(validCount, vertexCount,
+                        positions, dcAlpha, shR, shG, shB, sizes, corners,
+                        centerX, centerY, centerZ, radius);
             }
+        }
+
+        private static float[] robustCenterRadius(float[] xyz, boolean[] valid, int validCount) {
+            int stride = Math.max(1, validCount / ROBUST_SAMPLE_LIMIT);
+            int capacity = Math.min(validCount, (validCount + stride - 1) / stride + 1);
+            float[] xs = new float[capacity];
+            float[] ys = new float[capacity];
+            float[] zs = new float[capacity];
+            int count = 0;
+            int seen = 0;
+            for (int i = 0; i < valid.length && count < capacity; i++) {
+                if (!valid[i]) continue;
+                if (seen % stride == 0) {
+                    xs[count] = xyz[i * 3];
+                    ys[count] = xyz[i * 3 + 1];
+                    zs[count] = xyz[i * 3 + 2];
+                    count++;
+                }
+                seen++;
+            }
+            float[] sx = Arrays.copyOf(xs, count);
+            float[] sy = Arrays.copyOf(ys, count);
+            float[] sz = Arrays.copyOf(zs, count);
+            Arrays.sort(sx);
+            Arrays.sort(sy);
+            Arrays.sort(sz);
+            float cx = sx[count / 2];
+            float cy = sy[count / 2];
+            float cz = sz[count / 2];
+            float[] distances = new float[count];
+            for (int i = 0; i < count; i++) {
+                float dx = xs[i] - cx;
+                float dy = ys[i] - cy;
+                float dz = zs[i] - cz;
+                distances[i] = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            Arrays.sort(distances);
+            int index = Math.min(count - 1, Math.max(0, Math.round((count - 1) * 0.99f)));
+            float radius = Math.max(0.05f, distances[index] * 1.12f);
+            if (!Float.isFinite(radius) || radius <= 0f) radius = 1f;
+            return new float[] {cx, cy, cz, radius};
         }
 
         private static Header readHeader(RandomAccessFile input) throws IOException {
             Header header = new Header();
-            String first = input.readLine();
-            if (!"ply".equals(first)) {
-                throw new IOException("not a PLY file");
-            }
+            if (!"ply".equals(input.readLine())) throw new IOException("not a PLY file");
             boolean inVertex = false;
             String line;
             while ((line = input.readLine()) != null) {
@@ -737,9 +733,7 @@ public final class GaussianViewerActivity extends Activity {
                 } else if (trimmed.startsWith("element ")) {
                     String[] tokens = trimmed.split("\\s+");
                     inVertex = tokens.length >= 3 && "vertex".equals(tokens[1]);
-                    if (inVertex) {
-                        header.vertexCount = Integer.parseInt(tokens[2]);
-                    }
+                    if (inVertex) header.vertexCount = Integer.parseInt(tokens[2]);
                 } else if (inVertex && trimmed.startsWith("property ")) {
                     String[] tokens = trimmed.split("\\s+");
                     if (tokens.length != 3
@@ -758,17 +752,32 @@ public final class GaussianViewerActivity extends Activity {
             return header;
         }
 
+        private static int require(Header header, String name) throws IOException {
+            int index = header.indexOf(name);
+            if (index < 0) throw new IOException("missing PLY property " + name);
+            return index;
+        }
+
+        private static float valueAt(float[] values, int index) {
+            return index >= 0 ? finiteOrZero(values[index]) : 0f;
+        }
+
+        private static float finiteOrZero(float value) {
+            return Float.isFinite(value) ? value : 0f;
+        }
+
         private static FloatBuffer directFloats(int count) {
             return ByteBuffer.allocateDirect(count * Float.BYTES)
-                    .order(ByteOrder.nativeOrder())
-                    .asFloatBuffer();
+                    .order(ByteOrder.nativeOrder()).asFloatBuffer();
         }
 
         private static float safeExp(float value) {
+            if (!Float.isFinite(value)) return 0.008f;
             return (float) Math.exp(Math.max(-20f, Math.min(5f, value)));
         }
 
         private static float sigmoid(float x) {
+            if (!Float.isFinite(x)) return 0.5f;
             if (x >= 0f) {
                 float z = (float) Math.exp(-x);
                 return 1f / (1f + z);
@@ -777,22 +786,12 @@ public final class GaussianViewerActivity extends Activity {
             return z / (1f + z);
         }
 
-        private static float clamp01(float value) {
-            if (!Float.isFinite(value)) {
-                return 0.75f;
-            }
-            return Math.max(0f, Math.min(1f, value));
-        }
-
         private static final class Header {
             boolean binaryLittleEndian;
             int vertexCount;
             long bodyOffset;
             final List<String> properties = new ArrayList<>();
-
-            int indexOf(String name) {
-                return properties.indexOf(name);
-            }
+            int indexOf(String name) { return properties.indexOf(name); }
         }
     }
 }
