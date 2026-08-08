@@ -4,12 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CPP_DIR="$ROOT/app/src/main/cpp"
 ASSET_DIR="$ROOT/app/src/main/assets/vksplat_shader"
+NOTICE_DIR="$ROOT/app/src/main/assets/third_party"
 THIRD="$CPP_DIR/third_party"
 VKSPLAT_COMMIT="41cff93b79145dec314488d4313bc3a6d737038b"
 SLANG_VERSION="2026.14.1"
 
-rm -rf "$THIRD/vksplat" "$THIRD/glm" "$ASSET_DIR"
-mkdir -p "$THIRD" "$ASSET_DIR"
+rm -rf "$THIRD/vksplat" "$THIRD/glm" "$ASSET_DIR" "$NOTICE_DIR"
+mkdir -p "$THIRD" "$ASSET_DIR" "$NOTICE_DIR"
 
 git clone -q https://github.com/harry7557558/vksplat.git "$THIRD/vksplat"
 git -C "$THIRD/vksplat" checkout -q "$VKSPLAT_COMMIT"
@@ -85,6 +86,29 @@ PY
 
 sed -i 's/#define ENABLE_ASSERTION 0/#define ENABLE_ASSERTION 1/' "$THIRD/vksplat/vksplat/src/config.h"
 
+# VkSplat ships portable Vulkan radix-sort SPIR-V already. Its GLSL source relies on
+# GL_ARB_shading_language_include, which Android NDK glslc intentionally does not expose.
+# Keep the pinned upstream radix SPIR-V and rebuild only the differentiable Slang kernels whose
+# config changed for mobile Int64/F32-atomic emulation.
+python3 - "$THIRD/vksplat/compile_shaders.py" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+block = '''        # Radix sort
+        jobs.append(("radix_sort", [
+            ShaderJob("upsweep.comp", {}),
+            ShaderJob("spine.comp", {}),
+            ShaderJob("downsweep.comp", {}),
+        ], []))
+
+'''
+if block not in s:
+    raise SystemExit('compile_shaders radix block not found')
+s = s.replace(block, '')
+p.write_text(s)
+PY
+
 SLANG_ROOT="$RUNNER_TEMP/slang-$SLANG_VERSION"
 rm -rf "$SLANG_ROOT"
 mkdir -p "$SLANG_ROOT"
@@ -109,15 +133,16 @@ if [[ ! -x "$GLSLC" ]]; then
 fi
 
 pushd "$THIRD/vksplat" >/dev/null
-# Do not force the desktop GLSL radix-sort shaders through Android NDK glslc. Their source uses
-# GL_ARB_shading_language_include, while the pinned upstream repository already ships matching
-# Vulkan SPIR-V. The config.slang checksum changed above, so all affected differentiable 3DGS
-# Slang kernels are still rebuilt with the mobile emulation defines.
 python3 compile_shaders.py --slangc "$SLANGC" --glslc "$GLSLC"
 popd >/dev/null
 
 cp -R "$THIRD/vksplat/vksplat/shader/." "$ASSET_DIR/"
 printf '%s\n' "$VKSPLAT_COMMIT" > "$ASSET_DIR/VKSPLAT_COMMIT.txt"
 printf '%s\n' "$SLANG_VERSION" > "$ASSET_DIR/SLANG_VERSION.txt"
+
+# Package third-party attribution with the app. No source files are exposed as user artifacts.
+cp "$THIRD/vksplat/LICENSE" "$NOTICE_DIR/VkSplat-LICENSE.txt"
+printf 'VkSplat source commit: %s\nhttps://github.com/harry7557558/vksplat\n' "$VKSPLAT_COMMIT" > "$NOTICE_DIR/VkSplat-NOTICE.txt"
+if [[ -f "$THIRD/glm/copying.txt" ]]; then cp "$THIRD/glm/copying.txt" "$NOTICE_DIR/GLM-LICENSE.txt"; fi
 
 echo "Prepared VkSplat $VKSPLAT_COMMIT for Android"
