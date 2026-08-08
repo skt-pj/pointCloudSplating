@@ -1,0 +1,57 @@
+name: Apply library viewer polish
+
+on:
+  push:
+    branches:
+      - agent/android-depth-prior-3dgs
+    paths:
+      - .github/workflows/apply-library-polish.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/android-depth-prior-3dgs
+      - name: Polish library and viewer
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          library = Path('app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java')
+          text = library.read_text()
+          old = 'Bitmap bitmap = decodeThumbnail(findFirstJpeg(dataset), dp(600), dp(450));'
+          new = 'Bitmap bitmap = decodeThumbnail(findFirstJpeg(dataset), 480, 360);'
+          if old not in text and new not in text:
+              raise SystemExit('LibraryActivity thumbnail target fragment not found')
+          text = text.replace(old, new, 1)
+          library.write_text(text)
+
+          viewer = Path('app/src/main/java/com/sktpj/pointcloudsplatting/GaussianViewerActivity.java')
+          text = viewer.read_text()
+          old = '''            root.addView(button, new android.widget.LinearLayout.LayoutParams(
+                    activity.getResources().getDisplayMetrics().densityDpi >= 320 ? 108 : 92,
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT));
+'''
+          new = '''            int width = Math.round(92f * activity.getResources().getDisplayMetrics().density);
+            root.addView(button, new android.widget.LinearLayout.LayoutParams(
+                    width, android.widget.LinearLayout.LayoutParams.MATCH_PARENT));
+'''
+          if old not in text and new not in text:
+              raise SystemExit('GaussianViewerActivity button size fragment not found')
+          text = text.replace(old, new, 1)
+          viewer.write_text(text)
+          PY
+      - name: Commit polish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java \
+                  app/src/main/java/com/sktpj/pointcloudsplatting/GaussianViewerActivity.java
+          git diff --cached --quiet && exit 0
+          git commit -m "polish 3DGS library viewer UI"
+          git push origin HEAD:agent/android-depth-prior-3dgs
