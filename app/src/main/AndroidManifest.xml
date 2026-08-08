@@ -5,6 +5,7 @@
     <uses-feature android:name="android.hardware.camera" android:required="true" />
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
     <uses-feature android:name="com.google.ar.core.depth" android:required="true" />
+    <!-- v0.7.0 anisotropic Gaussian viewer requires OpenGL ES 3.0. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
     <application
