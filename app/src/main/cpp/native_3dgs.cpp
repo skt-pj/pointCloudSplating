@@ -143,7 +143,6 @@ TrainerConfig makeConfig(const std::string& dataRoot,
     c.stop_reset_at = -1;
     c.pause_refine_after_reset = 0;
 
-    // MCMC values are initialized even though the default densification strategy is selected.
     c.noise_lr = 5e5f;
     c.min_opacity = 0.005f;
     c.grow_factor = 1.05f;
@@ -170,7 +169,8 @@ void forward(VulkanGSTrainer& trainer,
     trainer.executeRasterizeForward(uniforms, buffers);
 }
 
-void trainOneStep(VulkanGSTrainer& trainer,
+/** Returns true only if this step reached image loss, rasterization backward and optimizer. */
+bool trainOneStep(VulkanGSTrainer& trainer,
                   const TrainerConfig& config,
                   VulkanGSRendererUniforms& uniforms,
                   VulkanGSPipelineBuffers& buffers,
@@ -182,11 +182,12 @@ void trainOneStep(VulkanGSTrainer& trainer,
 
     auto guard = DeviceGuard(&trainer);
     forward(trainer, uniforms, buffers);
-    if (buffers.num_indices == 0) return;
+    if (buffers.num_indices == 0) return false;
     trainer.executeComputeSSIMGradient(config, uniforms, buffers, imageIndex);
     trainer.executeRasterizeBackward(uniforms, buffers);
     trainer.executeFusedProjectionBackwardOptimizerStep(config, uniforms, buffers, step + 1);
     trainer.executeDefaultPostBackward(config, uniforms, buffers, step);
+    return true;
 }
 
 double validationPsnr(VulkanGSTrainer& trainer,
@@ -229,10 +230,12 @@ std::string deviceName(VulkanGSTrainer& trainer) {
     return "Vulkan device";
 }
 
-std::string successJson(size_t count, int steps, double psnr, const std::string& device) {
+std::string successJson(size_t count, int steps, int optimizedSteps,
+                        double psnr, const std::string& device) {
     std::ostringstream out;
     out << "{\"success\":true,\"message\":\"3DGS training complete\",\"gaussian_count\":"
-        << count << ",\"steps\":" << steps << ",\"device\":\"" << jsonEscape(device) << "\"";
+        << count << ",\"steps\":" << steps << ",\"optimized_steps\":" << optimizedSteps
+        << ",\"device\":\"" << jsonEscape(device) << "\"";
     if (std::isfinite(psnr)) out << ",\"validation_psnr\":" << psnr;
     out << "}";
     return out.str();
@@ -287,19 +290,36 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
         }
 
         const int steps = std::max(1000, static_cast<int>(trainSteps));
+        int optimizedSteps = 0;
         for (int step = 0; step < steps; ++step) {
             size_t imageIndex = static_cast<size_t>(step) % trainer.num_train();
-            trainOneStep(trainer, config, uniforms, buffers, imageIndex, step);
+            if (trainOneStep(trainer, config, uniforms, buffers, imageIndex, step)) {
+                optimizedSteps++;
+            }
             if (step == 0 || (step + 1) % 100 == 0 || step + 1 == steps) {
                 int percent = 5 + static_cast<int>(90.0 * (step + 1) / steps);
                 std::ostringstream message;
                 message << "写真と3Dモデルを比較して学習しています… " << (step + 1) << "/" << steps;
                 progress.send(percent, message.str());
                 std::ostringstream log;
-                log << "step=" << (step + 1) << "/" << steps << " gaussians=" << buffers.num_splats
+                log << "step=" << (step + 1) << "/" << steps
+                    << " optimized=" << optimizedSteps
+                    << " gaussians=" << buffers.num_splats
                     << " activeSH=" << uniforms.active_sh;
                 logi(log.str());
             }
+        }
+
+        // A run that only advanced the loop counter is not 3DGS training. Require a substantial
+        // number of views to have reached the real image-loss/backward/optimizer path before the
+        // reserved final artifact can be written or marked COMPLETE.
+        const int minOptimizedSteps = std::max(500, steps / 4);
+        if (optimizedSteps < minOptimizedSteps) {
+            std::ostringstream error;
+            error << "insufficient projected training steps: optimized=" << optimizedSteps
+                  << " required=" << minOptimizedSteps << " total=" << steps
+                  << ". Check camera pose/intrinsics and geometry coverage.";
+            throw std::runtime_error(error.str());
         }
 
         progress.send(96, "学習結果を確認しています…");
@@ -308,11 +328,12 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
         const size_t finalCount = buffers.num_splats;
         trainer.writePLY(outputPly, buffers);
         logi("Training COMPLETE gaussians=" + std::to_string(finalCount)
+             + " optimizedSteps=" + std::to_string(optimizedSteps)
              + " psnr=" + (std::isfinite(psnr) ? std::to_string(psnr) : std::string("n/a")));
         trainer.cleanupBuffers(buffers);
         trainer.cleanup();
         progress.send(100, "3DGS学習が完了しました");
-        std::string json = successJson(finalCount, steps, psnr, gpu);
+        std::string json = successJson(finalCount, steps, optimizedSteps, psnr, gpu);
         return env->NewStringUTF(json.c_str());
     } catch (const std::exception& error) {
         loge(std::string("3DGS training failed: ") + error.what());
