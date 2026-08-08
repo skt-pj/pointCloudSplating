@@ -1,0 +1,36 @@
+name: Apply capture flow patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-capture-flow-patch.yml'
+      - 'tools/apply_capture_flow_patch.py'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply capture/save/3DGS source patch
+        run: python tools/apply_capture_flow_patch.py
+
+      - name: Remove one-off patch files
+        run: |
+          rm -f tools/apply_capture_flow_patch.py
+          rm -f .github/workflows/apply-capture-flow-patch.yml
+
+      - name: Commit source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --exit-code && exit 0
+          git commit -m "add explicit save and 3DGS capture flow"
+          git push origin main
