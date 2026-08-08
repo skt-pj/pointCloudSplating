@@ -96,7 +96,6 @@ public final class PointCloudRenderer {
     public void update(DepthData depth) {
         depthFrames.add(depth);
         while (depthFrames.size() > MAX_FRAMES_STORED) {
-            depthFrames.get(0).getAnchor().detach();
             depthFrames.remove(0);
         }
     }
@@ -114,8 +113,6 @@ public final class PointCloudRenderer {
         float[] modelView = new float[16];
         float[] modelViewProjection = new float[16];
 
-        // Do not apply the -1m demonstration offset used by the upstream point-cloud-only sample.
-        // With a live camera background, the true ARCore view matrix is required for registration.
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthMask(true);
         GLES20.glUseProgram(program);
