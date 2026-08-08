@@ -16,6 +16,11 @@
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
         <activity
+            android:name=".ModelProcessingActivity"
+            android:configChanges="orientation|screenSize"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+        <activity
             android:name=".GaussianViewerActivity"
             android:configChanges="orientation|screenSize"
             android:exported="false" />
