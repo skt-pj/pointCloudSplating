@@ -15,7 +15,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-/** Finalizes the continuously-spooled capture into a stable dataset for later 3DGS training. */
+/** Finalizes continuously-spooled RGB/Pose observations and optional Raw Depth priors. */
 public final class DatasetFinalizer {
     private DatasetFinalizer() {}
 
@@ -33,8 +33,7 @@ public final class DatasetFinalizer {
         }
 
         static Result ok(File directory, int frameCount) {
-            return new Result(true, directory, frameCount,
-                    "saved " + frameCount + " keyframes");
+            return new Result(true, directory, frameCount, "saved " + frameCount + " keyframes");
         }
 
         static Result fail(File directory, String message) {
@@ -42,10 +41,6 @@ public final class DatasetFinalizer {
         }
     }
 
-    /**
-     * Writes a Nerfstudio-compatible transforms.json and a small session manifest, then renames
-     * capture_tmp_* to dataset_* so the user-visible Save button is the commit point.
-     */
     public static Result finalizeDataset(File workingDirectory) {
         if (workingDirectory == null || !workingDirectory.isDirectory()) {
             return Result.fail(workingDirectory, "capture directory unavailable");
@@ -68,28 +63,36 @@ public final class DatasetFinalizer {
             transforms.put("source", "pointCloudSplating ARCore SharedCamera");
 
             JSONArray frames = new JSONArray();
+            int depthFrames = 0;
             for (JSONObject source : sourceFrames) {
-                frames.put(toNerfstudioFrame(source));
+                JSONObject frame = toNerfstudioFrame(source);
+                frames.put(frame);
+                if (frame.has("depth_point_cloud_path")) {
+                    depthFrames++;
+                }
             }
             transforms.put("frames", frames);
+            transforms.put("rgb_frame_count", sourceFrames.size());
+            transforms.put("raw_depth_prior_frame_count", depthFrames);
             writeJson(new File(workingDirectory, "transforms.json"), transforms);
 
             JSONObject manifest = new JSONObject();
-            manifest.put("format_version", 1);
+            manifest.put("format_version", 2);
             manifest.put("state", "saved");
             manifest.put("frame_count", sourceFrames.size());
+            manifest.put("rgb_frame_count", sourceFrames.size());
+            manifest.put("raw_depth_prior_frame_count", depthFrames);
             manifest.put("transforms", "transforms.json");
             manifest.put("image_pattern", "frame_*.jpg");
             manifest.put("per_frame_metadata_pattern", "frame_*.json");
-            manifest.put("raw_depth_point_cloud_pattern", "frame_*.ply");
+            manifest.put("raw_depth_point_cloud_pattern", "frame_*.ply (optional per RGB frame)");
             manifest.put("capture_strategy",
-                    "quality-gated keyframes selected by viewpoint change, focus, exposure and motion");
-            manifest.put("note",
-                    "Per-frame PLY files are depth priors/initialization data; RGB images and camera poses are the primary 3DGS training observations.");
+                    "quality-gated RGB/Pose keyframes selected by viewpoint change, focus, exposure and motion");
+            manifest.put("observation_priority",
+                    "High-resolution RGB + synchronized camera pose are primary 3DGS observations; Raw Depth PLY is an optional geometry prior and does not gate a valid RGB frame.");
             writeJson(new File(workingDirectory, "dataset_manifest.json"), manifest);
 
-            try (FileOutputStream out = new FileOutputStream(
-                    new File(workingDirectory, ".saved"))) {
+            try (FileOutputStream out = new FileOutputStream(new File(workingDirectory, ".saved"))) {
                 out.write("saved\n".getBytes(StandardCharsets.UTF_8));
             }
 
@@ -132,7 +135,12 @@ public final class DatasetFinalizer {
 
         JSONObject out = new JSONObject();
         out.put("file_path", source.getString("image"));
-        out.put("depth_point_cloud_path", source.optString("point_cloud", ""));
+        if (!source.isNull("point_cloud")) {
+            String pointCloud = source.optString("point_cloud", "");
+            if (!pointCloud.isEmpty() && !"null".equals(pointCloud)) {
+                out.put("depth_point_cloud_path", pointCloud);
+            }
+        }
         out.put("w", jpegWidth);
         out.put("h", jpegHeight);
         out.put("fl_x", focal.getDouble(0) * scaleX);
@@ -141,6 +149,7 @@ public final class DatasetFinalizer {
         out.put("cy", principal.getDouble(1) * scaleY);
         out.put("capture_index", source.getInt("capture_index"));
         out.put("timestamp_ns", source.getLong("jpeg_sensor_timestamp_ns"));
+        out.put("has_raw_depth_prior", source.optBoolean("has_raw_depth_prior", false));
         out.put("transform_matrix",
                 columnMajorToRows(source.getJSONArray("world_from_camera_column_major")));
         return out;
