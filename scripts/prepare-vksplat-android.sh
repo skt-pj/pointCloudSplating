@@ -172,6 +172,11 @@ s = s.replace(warning_block, warning_fixed)
 p.write_text(s)
 PY
 
+# Patch renderer + cumsum source before Slang compilation so the APK assets contain the Mali fix.
+pushd "$ROOT" >/dev/null
+python3 scripts/patch-vksplat-cumsum-android.py
+popd >/dev/null
+
 SLANG_ROOT="$RUNNER_TEMP/slang-$SLANG_VERSION"
 rm -rf "$SLANG_ROOT"
 mkdir -p "$SLANG_ROOT"
