@@ -1,5 +1,7 @@
 package com.sktpj.pointcloudsplatting;
 
+import com.google.ar.core.Pose;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -8,7 +10,7 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 
-/** Immutable copy of one Raw Depth frame transformed into the ARCore world coordinate system. */
+/** Immutable copy of one Raw Depth frame transformed into the session root-anchor frame. */
 public final class WorldPointCloudSnapshot {
     private static final int POSITION_FLOATS_PER_POINT = 4;
     private static final int COLOR_FLOATS_PER_POINT = 3;
@@ -28,7 +30,7 @@ public final class WorldPointCloudSnapshot {
     }
 
     /** Copies the DepthData now, while its ARCore anchor is still active. */
-    public static WorldPointCloudSnapshot from(DepthData depth) {
+    public static WorldPointCloudSnapshot from(DepthData depth, Pose rootPose) {
         FloatBuffer points = depth.getPoints().duplicate();
         FloatBuffer colors = depth.getColors().duplicate();
         points.position(0);
@@ -39,7 +41,8 @@ public final class WorldPointCloudSnapshot {
                 colors.remaining() / COLOR_FLOATS_PER_POINT);
 
         float[] model = new float[16];
-        depth.getModelMatrix(model);
+        Pose rootFromDepthCamera = rootPose.inverse().compose(depth.getAnchor().getPose());
+        rootFromDepthCamera.toMatrix(model, 0);
 
         float[] xyz = new float[pointCount * 3];
         byte[] rgb = new byte[pointCount * 3];
@@ -79,7 +82,7 @@ public final class WorldPointCloudSnapshot {
         String header =
                 "ply\n"
                         + "format binary_little_endian 1.0\n"
-                        + "comment ARCore world coordinates; camera looks along local -Z\n"
+                        + "comment ARCore root-anchor local coordinates; camera looks along local -Z\n"
                         + "comment raw_depth_timestamp_ns " + timestampNs + "\n"
                         + "element vertex " + getPointCount() + "\n"
                         + "property float x\n"

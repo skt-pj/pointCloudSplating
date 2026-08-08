@@ -35,6 +35,7 @@ import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.google.ar.core.Anchor;
 import com.google.ar.core.ArCoreApk;
 import com.google.ar.core.Camera;
 import com.google.ar.core.CameraConfig;
@@ -52,6 +53,7 @@ import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
@@ -84,6 +86,8 @@ public final class ScannerActivity extends Activity
     private GLSurfaceView surfaceView;
     private TextView statusView;
     private Button menuButton;
+    private Button saveButton;
+    private Button gaussianButton;
     private DisplayManager displayManager;
 
     private Session session;
@@ -114,6 +118,10 @@ public final class ScannerActivity extends Activity
     private long depthTimestamp = -1L;
     private String lastStatus = "";
     private String cameraConfigSummary = "camera=?";
+    private volatile boolean captureFinalized;
+    private volatile boolean saveInProgress;
+    private volatile String finalizedDatasetPath;
+    private Anchor datasetRootAnchor;
 
     // Latest repeating Camera2 result. This is converted to a short manual exposure for each still.
     private volatile Long latestExposureTimeNs;
@@ -269,6 +277,19 @@ public final class ScannerActivity extends Activity
         menuButton.setPadding(0, 0, 0, 0);
         menuButton.setOnClickListener(v -> showMenu());
 
+        saveButton = new Button(this);
+        saveButton.setText("保存");
+        saveButton.setTextColor(0xFFFFFFFF);
+        saveButton.setBackgroundColor(0xAA202020);
+        saveButton.setOnClickListener(v -> saveCurrentDataset());
+
+        gaussianButton = new Button(this);
+        gaussianButton.setText("3DGS化");
+        gaussianButton.setTextColor(0xFFFFFFFF);
+        gaussianButton.setBackgroundColor(0xAA202020);
+        gaussianButton.setEnabled(false);
+        gaussianButton.setOnClickListener(v -> startGaussianSplatting());
+
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF1A1A1A);
         root.addView(surfaceView, new FrameLayout.LayoutParams(
@@ -288,6 +309,18 @@ public final class ScannerActivity extends Activity
         menuParams.topMargin = dp(6);
         menuParams.rightMargin = dp(6);
         root.addView(menuButton, menuParams);
+
+        FrameLayout.LayoutParams saveParams = new FrameLayout.LayoutParams(dp(132), dp(52));
+        saveParams.gravity = Gravity.BOTTOM | Gravity.START;
+        saveParams.leftMargin = dp(12);
+        saveParams.bottomMargin = dp(16);
+        root.addView(saveButton, saveParams);
+
+        FrameLayout.LayoutParams gsParams = new FrameLayout.LayoutParams(dp(132), dp(52));
+        gsParams.gravity = Gravity.BOTTOM | Gravity.END;
+        gsParams.rightMargin = dp(12);
+        gsParams.bottomMargin = dp(16);
+        root.addView(gaussianButton, gsParams);
         setContentView(root);
 
         displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -314,9 +347,7 @@ public final class ScannerActivity extends Activity
                 return true;
             }
             if (item.getItemId() == MENU_COPY_DATASET_PATH) {
-                String path = datasetCaptureManager == null
-                        ? "dataset unavailable"
-                        : datasetCaptureManager.getCaptureDirectoryPath();
+                String path = getCurrentDatasetPath();
                 copyText("pointCloudSplating dataset", path);
                 Toast.makeText(this, "保存先をコピーしました", Toast.LENGTH_SHORT).show();
                 return true;
@@ -324,6 +355,94 @@ public final class ScannerActivity extends Activity
             return false;
         });
         popup.show();
+    }
+
+
+    private String getCurrentDatasetPath() {
+        if (finalizedDatasetPath != null) {
+            return finalizedDatasetPath;
+        }
+        return datasetCaptureManager == null
+                ? "dataset unavailable"
+                : datasetCaptureManager.getCaptureDirectoryPath();
+    }
+
+    private void saveCurrentDataset() {
+        DatasetCaptureManager manager = datasetCaptureManager;
+        if (manager == null) {
+            Toast.makeText(this, "保存対象がありません", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (captureFinalized) {
+            Toast.makeText(this, "すでに保存済みです", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (saveInProgress) {
+            return;
+        }
+
+        saveInProgress = true;
+        saveButton.setEnabled(false);
+        gaussianButton.setEnabled(false);
+        setStatus("保存処理中: keyframe書き込みを確定しています...");
+
+        new Thread(() -> {
+            boolean flushed = manager.stopCaptureAndFlush(5_000L);
+            if (!flushed) {
+                manager.resumeCapture();
+                runOnUiThread(() -> {
+                    saveInProgress = false;
+                    saveButton.setEnabled(true);
+                    setStatus("保存できませんでした。撮影中のフレーム完了後にもう一度押してください。");
+                });
+                return;
+            }
+
+            DatasetFinalizer.Result result = DatasetFinalizer.finalizeDataset(
+                    new File(manager.getCaptureDirectoryPath()));
+            runOnUiThread(() -> {
+                saveInProgress = false;
+                if (result.success) {
+                    captureFinalized = true;
+                    finalizedDatasetPath = result.directory.getAbsolutePath();
+                    saveButton.setText("保存済み");
+                    saveButton.setEnabled(false);
+                    gaussianButton.setEnabled(true);
+                    setStatus("保存完了: " + result.frameCount + " keyframes\n"
+                            + finalizedDatasetPath);
+                    Toast.makeText(this, "データセットを保存しました", Toast.LENGTH_SHORT).show();
+                } else {
+                    manager.resumeCapture();
+                    saveButton.setEnabled(true);
+                    setStatus("保存失敗: " + result.message);
+                }
+            });
+        }, "FinalizeDataset").start();
+    }
+
+    private void startGaussianSplatting() {
+        if (!captureFinalized || finalizedDatasetPath == null) {
+            Toast.makeText(this, "先に保存してください", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        gaussianButton.setEnabled(false);
+        setStatus("3DGS入力を検証しています...");
+        File datasetDirectory = new File(finalizedDatasetPath);
+        new Thread(() -> {
+            GaussianSplatJob.Result result = GaussianSplatJob.prepare(datasetDirectory);
+            runOnUiThread(() -> {
+                gaussianButton.setEnabled(true);
+                if (result.success) {
+                    setStatus("3DGS開始要求を作成: " + result.frameCount + " keyframes\n"
+                            + "Native Vulkan trainerは次の実装段階です。");
+                    Toast.makeText(this, "3DGS入力準備完了", Toast.LENGTH_SHORT).show();
+                } else {
+                    setStatus("3DGS開始不可: " + result.message);
+                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
+                }
+            });
+        }, "Prepare3DGS").start();
     }
 
     private void copyLogsToClipboard() {
@@ -345,8 +464,7 @@ public final class ScannerActivity extends Activity
 
     private String buildDiagnosticReport() {
         int photos = datasetCaptureManager == null ? 0 : datasetCaptureManager.getSavedCount();
-        String dataset = datasetCaptureManager == null
-                ? "unavailable" : datasetCaptureManager.getCaptureDirectoryPath();
+        String dataset = getCurrentDatasetPath();
         String decision = datasetCaptureManager == null
                 ? "unavailable" : datasetCaptureManager.getLastDecision();
         return new StringBuilder()
@@ -363,6 +481,7 @@ public final class ScannerActivity extends Activity
                 .append("manualSensorSupported=").append(manualSensorSupported).append('\n')
                 .append("depthFrames=").append(pointCloudRenderer.getStoredFrameCount()).append('\n')
                 .append("savedDatasetFrames=").append(photos).append('\n')
+                .append("captureFinalized=").append(captureFinalized).append('\n')
                 .append("photoDecision=").append(decision).append('\n')
                 .append("dataset=").append(dataset).append('\n')
                 .append("status=").append(lastStatus).append("\n\n")
@@ -499,6 +618,10 @@ public final class ScannerActivity extends Activity
                     + "\nメニュー → ログをコピー");
         }
 
+        if (datasetRootAnchor != null) {
+            datasetRootAnchor.detach();
+            datasetRootAnchor = null;
+        }
         if (session != null) {
             session.close();
             session = null;
@@ -616,7 +739,9 @@ public final class ScannerActivity extends Activity
                 still.addTarget(jpegReader.getSurface());
                 still.setTag(HIGH_RES_CAPTURE_TAG);
                 still.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
-                still.set(CaptureRequest.JPEG_ORIENTATION, computeJpegOrientation());
+                // Keep the encoded pixels in sensor/readout orientation so camera pose and
+                // intrinsics have one deterministic convention for 3DGS input.
+                still.set(CaptureRequest.JPEG_ORIENTATION, 0);
                 still.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
                 still.set(
                         CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
@@ -843,8 +968,15 @@ public final class ScannerActivity extends Activity
                     return;
                 }
 
+                if (datasetRootAnchor == null && !captureFinalized && !saveInProgress) {
+                    datasetRootAnchor = session.createAnchor(camera.getPose());
+                    DiagnosticLog.i(TAG, "Dataset root anchor created");
+                }
+                com.google.ar.core.Pose datasetRootPose = datasetRootAnchor == null
+                        ? camera.getPose() : datasetRootAnchor.getPose();
+
                 if (datasetCaptureManager != null
-                        && datasetCaptureManager.onArFrame(frame, camera)) {
+                        && datasetCaptureManager.onArFrame(frame, camera, datasetRootPose)) {
                     requestHighResolutionStill();
                 }
 
@@ -862,7 +994,7 @@ public final class ScannerActivity extends Activity
                     if (depth != null) {
                         pointCloudRenderer.update(depth);
                         if (datasetCaptureManager != null) {
-                            datasetCaptureManager.onDepthFrame(depth);
+                            datasetCaptureManager.onDepthFrame(depth, datasetRootPose);
                         }
                     }
                 }
@@ -877,9 +1009,11 @@ public final class ScannerActivity extends Activity
                         ? 0 : datasetCaptureManager.getSavedCount();
                 String decision = datasetCaptureManager == null
                         ? "dataset unavailable" : datasetCaptureManager.getLastDecision();
+                String captureState = captureFinalized
+                        ? "saved" : (saveInProgress ? "saving" : "capturing");
                 setStatus(
                         "Raw depth: " + pointCloudRenderer.getStoredFrameCount()
-                                + " / saved sets: " + photos
+                                + " / keyframes: " + photos + " / " + captureState
                                 + "\nphoto: " + decision
                                 + "\n1/500 target / <=1/250 / ISO<=3200"
                                 + "\n" + cameraConfigSummary);

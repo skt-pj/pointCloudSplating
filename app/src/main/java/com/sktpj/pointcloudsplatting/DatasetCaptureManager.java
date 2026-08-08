@@ -42,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Saves synchronized reconstruction images, ARCore camera poses and Raw Depth point clouds. */
@@ -77,6 +78,7 @@ public final class DatasetCaptureManager {
     private Pose lastRequestedPose;
     private long lastRequestedTimestampNs = -1L;
     private boolean captureInFlight;
+    private volatile boolean captureEnabled = true;
     private volatile int savedCount;
     private volatile String lastDecision = "waiting for first stable view";
 
@@ -88,7 +90,7 @@ public final class DatasetCaptureManager {
             throw new IllegalStateException("External Pictures directory unavailable");
         }
         String sessionName = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-        captureRoot = new File(externalPicturesDir, "dataset_" + sessionName);
+        captureRoot = new File(externalPicturesDir, "capture_tmp_" + sessionName);
         if (!captureRoot.mkdirs() && !captureRoot.isDirectory()) {
             throw new IllegalStateException("Failed to create " + captureRoot);
         }
@@ -145,9 +147,9 @@ public final class DatasetCaptureManager {
     }
 
     /** Called on the AR/GL thread for each newly-created DepthData frame. */
-    public synchronized void onDepthFrame(DepthData depth) {
+    public synchronized void onDepthFrame(DepthData depth, Pose rootPose) {
         try {
-            WorldPointCloudSnapshot snapshot = WorldPointCloudSnapshot.from(depth);
+            WorldPointCloudSnapshot snapshot = WorldPointCloudSnapshot.from(depth, rootPose);
             depthSamples.addLast(snapshot);
             while (depthSamples.size() > MAX_DEPTH_SAMPLES) {
                 depthSamples.removeFirst();
@@ -159,12 +161,12 @@ public final class DatasetCaptureManager {
     }
 
     /** Records pose continuously and returns true when a useful, reasonably stable photo is due. */
-    public synchronized boolean onArFrame(Frame frame, Camera camera) {
+    public synchronized boolean onArFrame(Frame frame, Camera camera, Pose rootPose) {
         long timestampNs = frame.getTimestamp();
-        Pose pose = camera.getPose();
+        Pose pose = rootPose.inverse().compose(camera.getPose());
         Motion motion = measureMotion(pose, timestampNs);
 
-        poseSamples.addLast(PoseSample.from(timestampNs, camera));
+        poseSamples.addLast(PoseSample.from(timestampNs, camera, rootPose));
         while (poseSamples.size() > MAX_POSE_SAMPLES) {
             poseSamples.removeFirst();
         }
@@ -173,6 +175,10 @@ public final class DatasetCaptureManager {
         previousFrameTimestampNs = timestampNs;
         tryFinalizePendingLocked();
 
+        if (!captureEnabled) {
+            lastDecision = "capture stopped; press 3DGS after Save";
+            return false;
+        }
         if (captureInFlight) {
             lastDecision = "photo capture in flight";
             return false;
@@ -258,6 +264,58 @@ public final class DatasetCaptureManager {
                 image.close();
             }
         }
+    }
+
+
+    /** Stops requesting new keyframes and waits for the current Camera2/JPEG + disk writes. */
+    public boolean stopCaptureAndFlush(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + Math.max(1L, timeoutMs);
+        synchronized (this) {
+            captureEnabled = false;
+            lastDecision = "capture stopped; finalizing";
+        }
+
+        while (true) {
+            boolean settled;
+            synchronized (this) {
+                settled = !captureInFlight && pendingJpegs.isEmpty();
+            }
+            if (settled) {
+                break;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                synchronized (this) {
+                    lastDecision = "save timed out waiting for Camera2 frame";
+                }
+                return false;
+            }
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        long remaining = Math.max(1L, deadline - System.currentTimeMillis());
+        try {
+            writer.submit(() -> {}).get(remaining, TimeUnit.MILLISECONDS);
+            synchronized (this) {
+                lastDecision = "capture stopped; ready to save";
+            }
+            return true;
+        } catch (Exception e) {
+            DiagnosticLog.w(TAG, "Timed out flushing dataset writer: " + e.getMessage());
+            synchronized (this) {
+                lastDecision = "save timed out flushing files";
+            }
+            return false;
+        }
+    }
+
+    public synchronized void resumeCapture() {
+        captureEnabled = true;
+        lastDecision = "capture resumed";
     }
 
     public void shutdown() {
@@ -407,7 +465,7 @@ public final class DatasetCaptureManager {
         json.put("raw_depth_timestamp_ns", cloud.getTimestampNs());
         json.put("depth_timestamp_delta_ns", cloud.getTimestampNs() - jpeg.timestampNs);
         json.put("point_count", cloud.getPointCount());
-        json.put("point_cloud_coordinate_system", "ARCore world coordinates");
+        json.put("point_cloud_coordinate_system", "ARCore root-anchor local coordinates");
         json.put("translation_m", array(pose.translation));
         json.put("rotation_quaternion_xyzw", array(pose.rotationQuaternion));
         json.put("world_from_camera_column_major", array(pose.worldFromCamera));
@@ -503,7 +561,7 @@ public final class DatasetCaptureManager {
                         c.get(CameraCharacteristics.LENS_DISTORTION));
             }
             json.put("dataset_contents",
-                    "Each frame has .jpg + synchronized ARCore camera pose JSON + world-space Raw Depth .ply");
+                    "Each frame has .jpg + synchronized root-anchor camera pose JSON + Raw Depth .ply");
             json.put("capture_policy",
                     "Prefer 1/500 s; save no slower than 1/250 s and no higher than ISO 3200");
             json.put("stabilization_policy", "EIS OFF; OIS OFF for saved stills");
@@ -703,8 +761,8 @@ public final class DatasetCaptureManager {
             this.textureDimensions = textureDimensions;
         }
 
-        static PoseSample from(long timestampNs, Camera camera) {
-            Pose pose = camera.getPose();
+        static PoseSample from(long timestampNs, Camera camera, Pose rootPose) {
+            Pose pose = rootPose.inverse().compose(camera.getPose());
             float[] worldFromCamera = new float[16];
             float[] cameraFromWorld = new float[16];
             pose.toMatrix(worldFromCamera, 0);
