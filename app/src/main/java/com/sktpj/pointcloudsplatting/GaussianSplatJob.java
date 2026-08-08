@@ -54,6 +54,11 @@ public final class GaussianSplatJob {
         }
     }
 
+    /** Existing scanner/library entry point; all callers now execute the full native trainer. */
+    public static Result prepare(File datasetDirectory, ProgressListener listener) {
+        return prepare(PointCloudApp.context(), datasetDirectory, listener);
+    }
+
     public static Result prepare(Context context, File datasetDirectory, ProgressListener listener) {
         notifyProgress(listener, 1, "撮影した写真とカメラ位置を確認しています…");
         if (context == null || datasetDirectory == null || !datasetDirectory.isDirectory()) {
