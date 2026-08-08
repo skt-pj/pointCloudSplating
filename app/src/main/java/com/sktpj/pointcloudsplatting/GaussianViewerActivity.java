@@ -145,6 +145,32 @@ public final class GaussianViewerActivity extends Activity {
         sizeParams.bottomMargin = dp(8);
         root.addView(sizePanel, sizeParams);
 
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int topInset = insets.getSystemWindowInsetTop();
+            int bottomInset = insets.getSystemWindowInsetBottom();
+            int leftInset = insets.getSystemWindowInsetLeft();
+            int rightInset = insets.getSystemWindowInsetRight();
+            if (android.os.Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
+                android.view.DisplayCutout cutout = insets.getDisplayCutout();
+                topInset = Math.max(topInset, cutout.getSafeInsetTop());
+                bottomInset = Math.max(bottomInset, cutout.getSafeInsetBottom());
+                leftInset = Math.max(leftInset, cutout.getSafeInsetLeft());
+                rightInset = Math.max(rightInset, cutout.getSafeInsetRight());
+            }
+            FrameLayout.LayoutParams tp = (FrameLayout.LayoutParams) top.getLayoutParams();
+            tp.leftMargin = leftInset + dp(8);
+            tp.rightMargin = rightInset + dp(8);
+            tp.topMargin = topInset + dp(16);
+            top.setLayoutParams(tp);
+            FrameLayout.LayoutParams sp = (FrameLayout.LayoutParams) sizePanel.getLayoutParams();
+            sp.leftMargin = leftInset + dp(8);
+            sp.rightMargin = rightInset + dp(8);
+            sp.bottomMargin = bottomInset + dp(12);
+            sizePanel.setLayoutParams(sp);
+            return insets;
+        });
+        root.post(root::requestApplyInsets);
+
         setContentView(root);
         loadModelAsync(selectedModel, previewModel);
     }

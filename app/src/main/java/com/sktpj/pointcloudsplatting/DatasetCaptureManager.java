@@ -57,6 +57,7 @@ public final class DatasetCaptureManager {
 
     private static final float MAX_LINEAR_SPEED_MPS = 0.25f;
     private static final float MAX_ANGULAR_SPEED_DPS = 20.0f;
+    private static final float MOTION_FILTER_ALPHA = 0.35f;
     private static final long MAX_POSE_MATCH_DELTA_NS = 75_000_000L;
     private static final long MAX_DEPTH_MATCH_DELTA_NS = 250_000_000L;
     // Raw Depth is a geometry prior, not a reason to throw away a valid RGB/Pose observation.
@@ -81,6 +82,9 @@ public final class DatasetCaptureManager {
     private long previousFrameTimestampNs = -1L;
     private Pose lastRequestedPose;
     private long lastRequestedTimestampNs = -1L;
+    private float filteredLinearSpeedMps;
+    private float filteredAngularSpeedDps;
+    private boolean hasFilteredMotion;
     private boolean captureInFlight;
     private boolean cameraActive = true;
     private boolean fallbackDepthPriorsQueued;
@@ -159,6 +163,7 @@ public final class DatasetCaptureManager {
         previousFrameTimestampNs = -1L;
         lastRequestedPose = null;
         lastRequestedTimestampNs = -1L;
+        resetMotionFilterLocked();
         poseSamples.clear();
         depthSamples.clear();
         pendingJpegs.clear();
@@ -181,6 +186,7 @@ public final class DatasetCaptureManager {
         previousFrameTimestampNs = -1L;
         lastRequestedPose = null;
         lastRequestedTimestampNs = -1L;
+        resetMotionFilterLocked();
         lastDecision = captureEnabled ? "camera paused" : "capture stopped; finalizing";
         DiagnosticLog.i(TAG,
                 "Camera synchronization state reset on pause pending=" + discardedPending);
@@ -210,7 +216,7 @@ public final class DatasetCaptureManager {
         }
         long timestampNs = frame.getTimestamp();
         Pose pose = rootPose.inverse().compose(camera.getPose());
-        Motion motion = measureMotion(pose, timestampNs);
+        Motion motion = filterMotionLocked(measureMotion(pose, timestampNs));
 
         poseSamples.addLast(PoseSample.from(timestampNs, camera, rootPose));
         while (poseSamples.size() > MAX_POSE_SAMPLES) {
@@ -411,6 +417,26 @@ public final class DatasetCaptureManager {
 
     public void shutdown() {
         writer.shutdown();
+    }
+
+    private Motion filterMotionLocked(Motion raw) {
+        if (!hasFilteredMotion) {
+            filteredLinearSpeedMps = raw.linearSpeedMps;
+            filteredAngularSpeedDps = raw.angularSpeedDps;
+            hasFilteredMotion = true;
+        } else {
+            filteredLinearSpeedMps += MOTION_FILTER_ALPHA
+                    * (raw.linearSpeedMps - filteredLinearSpeedMps);
+            filteredAngularSpeedDps += MOTION_FILTER_ALPHA
+                    * (raw.angularSpeedDps - filteredAngularSpeedDps);
+        }
+        return new Motion(filteredLinearSpeedMps, filteredAngularSpeedDps);
+    }
+
+    private void resetMotionFilterLocked() {
+        filteredLinearSpeedMps = 0f;
+        filteredAngularSpeedDps = 0f;
+        hasFilteredMotion = false;
     }
 
     private Motion measureMotion(Pose pose, long timestampNs) {

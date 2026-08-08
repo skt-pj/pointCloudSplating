@@ -72,6 +72,22 @@ public final class ModelProcessingActivity extends Activity {
         cardParams.leftMargin = dp(20);
         cardParams.rightMargin = dp(20);
         root.addView(card, cardParams);
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            int bottom = insets.getSystemWindowInsetBottom();
+            int left = insets.getSystemWindowInsetLeft();
+            int right = insets.getSystemWindowInsetRight();
+            if (android.os.Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
+                android.view.DisplayCutout cutout = insets.getDisplayCutout();
+                top = Math.max(top, cutout.getSafeInsetTop());
+                bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                left = Math.max(left, cutout.getSafeInsetLeft());
+                right = Math.max(right, cutout.getSafeInsetRight());
+            }
+            root.setPadding(left + dp(12), top + dp(12), right + dp(12), bottom + dp(12));
+            return insets;
+        });
+        root.post(root::requestApplyInsets);
         setContentView(root);
     }
 

@@ -416,9 +416,9 @@ public final class ScannerActivity extends Activity
         actionBar.addView(saveButton, saveParams);
 
         gaussianButton = new Button(this);
-        gaussianButton.setText("3Dプレビューを作成");
+        gaussianButton.setText("3Dモデルを作成");
         styleButton(gaussianButton, 0xFF0B57D0, 15f);
-        gaussianButton.setContentDescription("撮影した写真から3Dプレビューを作成する");
+        gaussianButton.setContentDescription("撮影した写真から3Dモデルを作成する");
         gaussianButton.setOnClickListener(v -> startGaussianSplatting());
         LinearLayout.LayoutParams modelParams = new LinearLayout.LayoutParams(0, dp(56), 0.58f);
         modelParams.leftMargin = dp(6);
@@ -431,6 +431,42 @@ public final class ScannerActivity extends Activity
         actionParams.rightMargin = dp(12);
         actionParams.bottomMargin = dp(16);
         root.addView(actionBar, actionParams);
+
+        // targetSdk 35+ is edge-to-edge on Android 15+. Keep camera content edge-to-edge,
+        // but move every interactive overlay into the safe drawing region. An extra 20dp
+        // breathing room keeps controls visibly away from the status bar/camera cutout.
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            int bottom = insets.getSystemWindowInsetBottom();
+            int left = insets.getSystemWindowInsetLeft();
+            int right = insets.getSystemWindowInsetRight();
+            if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
+                android.view.DisplayCutout cutout = insets.getDisplayCutout();
+                top = Math.max(top, cutout.getSafeInsetTop());
+                bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                left = Math.max(left, cutout.getSafeInsetLeft());
+                right = Math.max(right, cutout.getSafeInsetRight());
+            }
+            setFrameMargins(statusCard, left + dp(12), top + dp(20), right + dp(72), 0);
+            setFrameMargins(menuButton, 0, top + dp(20), right + dp(12), 0);
+            setFrameMargins(actionBar, left + dp(12), 0, right + dp(12), bottom + dp(16));
+            setFrameMargins(modeButton, 0, 0, 0, bottom + dp(102));
+            setFrameMargins(feedbackView, left + dp(24), 0, right + dp(24), bottom + dp(162));
+            return insets;
+        });
+        root.post(root::requestApplyInsets);
+    }
+
+    private void setFrameMargins(View view, int left, int top, int right, int bottom) {
+        if (!(view.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) view.getLayoutParams();
+        if (params.leftMargin == left && params.topMargin == top
+                && params.rightMargin == right && params.bottomMargin == bottom) return;
+        params.leftMargin = left;
+        params.topMargin = top;
+        params.rightMargin = right;
+        params.bottomMargin = bottom;
+        view.setLayoutParams(params);
     }
 
     private void styleButton(Button button, int backgroundColor, float textSizeSp) {
