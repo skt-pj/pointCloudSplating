@@ -486,7 +486,7 @@ public final class ScannerActivity extends Activity
 
     private void showMenu() {
         PopupMenu popup = new PopupMenu(this, menuButton);
-        popup.getMenu().add(0, MENU_LIBRARY, 0, "保存したスキャン");
+        popup.getMenu().add(0, MENU_LIBRARY, 0, "ライブラリ");
         popup.getMenu().add(0, MENU_COPY_LOG, 1, "診断情報をコピー");
         popup.getMenu().add(0, MENU_COPY_DATASET_PATH, 2, "保存場所をコピー");
         popup.getMenu().add(0, MENU_TOGGLE_POINTS, 3,
@@ -692,7 +692,7 @@ public final class ScannerActivity extends Activity
                     showFeedback("撮影データは失われていません。もう一度準備できます");
                 } else {
                     showState("3Dプレビューを準備できませんでした",
-                            "保存したスキャンを確認して、もう一度お試しください。直らない場合は診断情報をコピーしてください。");
+                            "ライブラリを確認して、もう一度お試しください。直らない場合は診断情報をコピーしてください。");
                     DiagnosticLog.w(TAG, "3D preview preparation failed userMessage=" + result.message);
                 }
             });
