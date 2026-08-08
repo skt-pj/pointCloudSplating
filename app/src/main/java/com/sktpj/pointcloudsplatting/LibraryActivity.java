@@ -23,6 +23,7 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
@@ -34,9 +35,11 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-/** Thumbnail library for saved reconstruction datasets and their generated Gaussian splats. */
+/** Thumbnail library for saved reconstruction datasets and their real training state. */
 public final class LibraryActivity extends Activity {
     private static final int CARD_THUMBNAIL_HEIGHT_DP = 150;
+    private static final String FINAL_SPLAT = "splat.ply";
+    private static final String DEPTH_PRIOR = "depth_prior.ply";
 
     private GridLayout grid;
     private TextView emptyView;
@@ -119,6 +122,7 @@ public final class LibraryActivity extends Activity {
         grid.removeAllViews();
         emptyView.setVisibility(datasets.isEmpty() ? View.VISIBLE : View.GONE);
         for (File dataset : datasets) {
+            migrateLegacyDepthPrior(dataset);
             grid.addView(createDatasetCard(dataset));
         }
     }
@@ -142,7 +146,7 @@ public final class LibraryActivity extends Activity {
         ImageView thumbnail = new ImageView(this);
         thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
         thumbnail.setBackgroundColor(0xFF151515);
-        Bitmap bitmap = decodeThumbnail(findFirstJpeg(dataset), dp(600), dp(450));
+        Bitmap bitmap = decodeThumbnail(findFirstJpeg(dataset), 480, 360);
         if (bitmap != null) {
             thumbnail.setImageBitmap(bitmap);
         }
@@ -164,39 +168,55 @@ public final class LibraryActivity extends Activity {
         status.setPadding(dp(4), dp(3), dp(4), dp(2));
         card.addView(status);
 
-        card.setOnClickListener(v -> openOrGenerate(dataset, status));
+        card.setOnClickListener(v -> openOrPrepare(dataset, status));
         return card;
     }
 
-    private void openOrGenerate(File dataset, TextView status) {
-        File splat = new File(dataset, "splat.ply");
-        if (splat.isFile()) {
+    private void openOrPrepare(File dataset, TextView status) {
+        migrateLegacyDepthPrior(dataset);
+        if (isPhotometricComplete(dataset)) {
             openViewer(dataset);
             return;
         }
+
+        File prior = new File(dataset, DEPTH_PRIOR);
+        if (prior.isFile()) {
+            Toast.makeText(this,
+                    "Depth priorは準備済みです。RGB photometric 3DGS学習はまだ未完了です。",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
         if (generationInProgress) {
-            Toast.makeText(this, "3DGS生成処理中です", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Depth prior初期化処理中です", Toast.LENGTH_SHORT).show();
             return;
         }
         generationInProgress = true;
-        status.setText("3DGS生成中...");
-        Toast.makeText(this, "3DGSを生成しています", Toast.LENGTH_SHORT).show();
+        status.setText("Depth prior初期化中...\n3DGS学習とは別処理です");
+        Toast.makeText(this, "Depth priorを初期化しています", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             GaussianSplatJob.Result result = GaussianSplatJob.prepare(dataset);
             runOnUiThread(() -> {
                 generationInProgress = false;
-                if (result.success) {
-                    status.setText(buildDatasetStatus(dataset));
+                status.setText(buildDatasetStatus(dataset));
+                if (result.success && isPhotometricComplete(dataset)) {
                     openViewer(dataset);
+                } else if (result.priorReady) {
+                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 } else {
-                    status.setText(buildDatasetStatus(dataset));
                     Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 }
             });
-        }, "Library3DGS").start();
+        }, "LibraryDepthPrior").start();
     }
 
     private void openViewer(File dataset) {
+        if (!isPhotometricComplete(dataset)) {
+            Toast.makeText(this,
+                    "photometric optimization済み3DGSではありません",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
         Intent intent = new Intent(this, GaussianViewerActivity.class);
         intent.putExtra(GaussianViewerActivity.EXTRA_DATASET_PATH, dataset.getAbsolutePath());
         startActivity(intent);
@@ -204,15 +224,64 @@ public final class LibraryActivity extends Activity {
 
     private String buildDatasetStatus(File dataset) {
         int frames = readFrameCount(dataset);
-        File splat = new File(dataset, "splat.ply");
-        if (!splat.isFile()) {
-            return frames + " keyframes\n3DGS未生成 — タップで生成";
+        if (isPhotometricComplete(dataset)) {
+            int gaussians = readGaussianCount(dataset);
+            String gaussianText = gaussians > 0
+                    ? String.format(Locale.US, "%,d Gaussians", gaussians)
+                    : "3DGS学習済み";
+            return frames + " keyframes\n" + gaussianText + " / RGB最適化済み";
         }
-        int gaussians = readGaussianCount(dataset);
-        String gaussianText = gaussians > 0
-                ? String.format(Locale.US, "%,d Gaussians", gaussians)
-                : "3DGS生成済み";
-        return frames + " keyframes\n" + gaussianText;
+
+        File prior = new File(dataset, DEPTH_PRIOR);
+        if (prior.isFile()) {
+            int gaussians = readGaussianCount(dataset);
+            String priorText = gaussians > 0
+                    ? String.format(Locale.US, "Depth prior: %,d Gaussians", gaussians)
+                    : "Depth prior準備済み";
+            return frames + " keyframes\n" + priorText + " / 3DGS未学習";
+        }
+        return frames + " keyframes\n3DGS未学習 — タップでDepth初期化";
+    }
+
+    private static boolean isPhotometricComplete(File dataset) {
+        File splat = new File(dataset, FINAL_SPLAT);
+        if (!splat.isFile()) {
+            return false;
+        }
+        JSONObject result = readResult(dataset);
+        return result != null
+                && result.optBoolean("photometric_optimization", false)
+                && result.optBoolean("final_3dgs", false)
+                && "COMPLETE".equals(result.optString("status", ""));
+    }
+
+    /**
+     * v0.5.5 and older experimental builds named the depth-only initializer output splat.ply.
+     * Move it out of the final-artifact name so it cannot be mistaken for trained 3DGS.
+     */
+    private static void migrateLegacyDepthPrior(File dataset) {
+        File finalSplat = new File(dataset, FINAL_SPLAT);
+        File prior = new File(dataset, DEPTH_PRIOR);
+        if (!finalSplat.isFile() || prior.isFile()) {
+            return;
+        }
+        JSONObject result = readResult(dataset);
+        if (result == null || result.optBoolean("photometric_optimization", false)) {
+            return;
+        }
+        if (!finalSplat.renameTo(prior)) {
+            return;
+        }
+        try {
+            result.put("status", "DEPTH_PRIOR_READY");
+            result.put("output", DEPTH_PRIOR);
+            result.put("photometric_optimization", false);
+            result.put("final_3dgs", false);
+            result.put("note",
+                    "Migrated legacy depth-only Gaussian output; not a completed 3DGS model.");
+            writeText(new File(dataset, "3dgs_result.json"), result.toString(2));
+        } catch (Exception ignored) {
+        }
     }
 
     private static List<File> findSavedDatasets(File pictures) {
@@ -279,15 +348,19 @@ public final class LibraryActivity extends Activity {
     }
 
     private static int readGaussianCount(File dataset) {
+        JSONObject result = readResult(dataset);
+        return result == null ? 0 : result.optInt("gaussian_count", 0);
+    }
+
+    private static JSONObject readResult(File dataset) {
         File result = new File(dataset, "3dgs_result.json");
         try {
             if (result.isFile()) {
-                JSONObject json = new JSONObject(readText(result));
-                return json.optInt("gaussian_count", 0);
+                return new JSONObject(readText(result));
             }
         } catch (Exception ignored) {
         }
-        return 0;
+        return null;
     }
 
     private static int countJpegs(File dataset) {
@@ -306,6 +379,12 @@ public final class LibraryActivity extends Activity {
             }
         }
         return out.toString();
+    }
+
+    private static void writeText(File file, String text) throws Exception {
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+        }
     }
 
     private static String formatDatasetName(String name) {
