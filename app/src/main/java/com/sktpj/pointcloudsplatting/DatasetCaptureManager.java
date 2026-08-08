@@ -59,8 +59,8 @@ public final class DatasetCaptureManager {
     private static final float MAX_ANGULAR_SPEED_DPS = 20.0f;
     private static final long MAX_POSE_MATCH_DELTA_NS = 75_000_000L;
     private static final long MAX_DEPTH_MATCH_DELTA_NS = 250_000_000L;
-    private static final long MAX_STILL_EXPOSURE_NS = 4_000_000L; // 1/250 s
-    private static final int MAX_STILL_ISO = 3200;
+    private static final long MAX_STILL_EXPOSURE_NS = 8_000_000L; // 1/125 s indoor fallback
+    private static final int MAX_STILL_ISO = 6400;
 
     private static final int MAX_POSE_SAMPLES = 180;
     private static final int MAX_DEPTH_SAMPLES = 24;
@@ -176,7 +176,7 @@ public final class DatasetCaptureManager {
         tryFinalizePendingLocked();
 
         if (!captureEnabled) {
-            lastDecision = "capture stopped; press 3DGS after Save";
+            lastDecision = "capture stopped; finalizing";
             return false;
         }
         if (captureInFlight) {
@@ -265,7 +265,6 @@ public final class DatasetCaptureManager {
             }
         }
     }
-
 
     /** Stops requesting new keyframes and waits for the current Camera2/JPEG + disk writes. */
     public boolean stopCaptureAndFlush(long timeoutMs) {
@@ -589,7 +588,7 @@ public final class DatasetCaptureManager {
             json.put("dataset_contents",
                     "Each frame has .jpg + synchronized root-anchor camera pose JSON + Raw Depth .ply");
             json.put("capture_policy",
-                    "Prefer 1/500 s; save no slower than 1/250 s and no higher than ISO 3200");
+                    "Prefer 1/500 s; indoor fallback no slower than 1/125 s and no higher than ISO 6400");
             json.put("stabilization_policy", "EIS OFF; OIS OFF for saved stills");
             try (FileOutputStream out =
                          new FileOutputStream(new File(captureRoot, "session_camera.json"))) {
