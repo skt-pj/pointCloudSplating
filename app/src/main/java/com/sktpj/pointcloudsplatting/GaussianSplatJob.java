@@ -23,6 +23,10 @@ public final class GaussianSplatJob {
 
     private GaussianSplatJob() {}
 
+    public interface ProgressListener {
+        void onProgress(int percent, String message);
+    }
+
     public static final class Result {
         /** True only when full rasterized RGB photometric 3DGS optimization has completed. */
         public final boolean success;
@@ -68,12 +72,17 @@ public final class GaussianSplatJob {
     }
 
     public static Result prepare(File datasetDirectory) {
+        return prepare(datasetDirectory, null);
+    }
+
+    public static Result prepare(File datasetDirectory, ProgressListener listener) {
+        notifyProgress(listener, 2, "撮影データを確認しています…");
         if (datasetDirectory == null || !datasetDirectory.isDirectory()) {
-            return Result.fail("dataset directory unavailable", 0);
+            return Result.fail("撮影データが見つかりませんでした。", 0);
         }
         File transformsFile = new File(datasetDirectory, "transforms.json");
         if (!transformsFile.isFile()) {
-            return Result.fail("transforms.json is missing; press Save first", 0);
+            return Result.fail("撮影データの保存が完了していません。", 0);
         }
 
         try {
@@ -81,7 +90,7 @@ public final class GaussianSplatJob {
             JSONArray frames = transforms.getJSONArray("frames");
             int count = frames.length();
             if (count == 0) {
-                return Result.fail("no saved keyframes available for 3DGS", 0);
+                return Result.fail("保存できた写真がありません。", 0);
             }
 
             DatasetStats stats = validatePhotometricDataset(datasetDirectory, frames);
@@ -118,17 +127,21 @@ public final class GaussianSplatJob {
             File priorFile = new File(datasetDirectory, DEPTH_PRIOR_NAME);
             int priorCount = 0;
             if (!priorFile.isFile()) {
+                notifyProgress(listener, 8, "3Dの形を準備しています…");
                 job.put("status", "INITIALIZING_DEPTH_PRIOR");
                 writeJson(jobFile, job);
                 GaussianSplatTrainer.Result initialization = GaussianSplatTrainer.train(
                         datasetDirectory,
-                        (percent, message) -> DiagnosticLog.i(
-                                TAG, "depth-prior " + percent + "% " + message));
+                        (percent, message) -> {
+                            DiagnosticLog.i(TAG, "depth-prior " + percent + "% " + message);
+                            int mapped = 8 + Math.round(percent * 0.27f);
+                            notifyProgress(listener, mapped, "3Dの形を準備しています…");
+                        });
                 if (!initialization.success) {
                     job.put("status", "FAILED_DEPTH_PRIOR");
                     job.put("error", initialization.message);
                     writeJson(jobFile, job);
-                    return Result.fail(initialization.message, count);
+                    return Result.fail("3Dの形を作るための情報を準備できませんでした。", count);
                 }
                 priorFile = moveInitializerOutput(datasetDirectory, initialization.outputFile);
                 priorCount = initialization.gaussianCount;
@@ -139,6 +152,7 @@ public final class GaussianSplatJob {
                 DiagnosticLog.i(TAG, "Reusing depth prior " + priorFile.getAbsolutePath());
             }
 
+            notifyProgress(listener, 36, "写真から色と質感を読み取っています…");
             job.put("status", "REFINING_HIGH_RES_RGB");
             job.put("depth_prior_output", priorFile.getName());
             job.put("depth_prior_gaussian_count", priorCount);
@@ -146,17 +160,23 @@ public final class GaussianSplatJob {
 
             HighQualityGaussianTrainer.Result hq = HighQualityGaussianTrainer.train(
                     datasetDirectory,
-                    (percent, message) -> DiagnosticLog.i(
-                            TAG, "hq " + percent + "% " + message));
+                    (percent, message) -> {
+                        DiagnosticLog.i(TAG, "hq " + percent + "% " + message);
+                        int mapped = 36 + Math.round(percent * 0.62f);
+                        notifyProgress(listener, mapped, userStageMessage(percent));
+                    });
             if (!hq.success) {
                 job.put("status", "DEPTH_PRIOR_READY");
                 job.put("hq_error", hq.message);
                 job.put("photometric_optimization", false);
                 job.put("final_3dgs", false);
                 writeJson(jobFile, job);
-                String message = "Depth priorは準備済みですが、高解像度RGB反映に失敗しました: "
-                        + hq.message;
-                return Result.priorReady(message, count, priorCount, priorFile);
+                DiagnosticLog.w(TAG, "HQ refinement failed after depth prior: " + hq.message);
+                return Result.priorReady(
+                        "3Dモデルの色と形を仕上げられませんでした。もう一度お試しください。",
+                        count,
+                        priorCount,
+                        priorFile);
             }
 
             job.put("status", "HQ_RGB_REFINED");
@@ -173,16 +193,38 @@ public final class GaussianSplatJob {
             }
             writeJson(jobFile, job);
 
-            String message = "高品質RGB反映完了: " + hq.gaussianCount + " Gaussians / "
-                    + hq.texturedGaussianCount + " textured。"
-                    + "保存済み高解像度JPEG・Pose・intrinsicsを使用しています。"
-                    + "Full Vulkan L1+SSIM optimizerは次段階です。";
-            DiagnosticLog.i(TAG, message + " output=" + hq.outputFile.getAbsolutePath());
-            return Result.hqReady(message, count, hq.gaussianCount, hq.outputFile);
+            String technicalMessage = "HQ RGB refinement complete: " + hq.gaussianCount
+                    + " gaussians / " + hq.texturedGaussianCount
+                    + " textured / rmse=" + hq.photometricRmse;
+            DiagnosticLog.i(TAG, technicalMessage + " output=" + hq.outputFile.getAbsolutePath());
+            notifyProgress(listener, 100, "3Dモデルを仕上げました");
+            return Result.hqReady(
+                    "3Dモデルを作成しました。",
+                    count,
+                    hq.gaussianCount,
+                    hq.outputFile);
         } catch (IOException | JSONException | RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to prepare/refine 3DGS dataset", e);
-            return Result.fail(
-                    "3DGS preparation failed: " + e.getClass().getSimpleName(), 0);
+            return Result.fail("3Dモデルを作成できませんでした。", 0);
+        }
+    }
+
+    private static String userStageMessage(int trainerPercent) {
+        if (trainerPercent < 15) {
+            return "3Dの形を整えています…";
+        }
+        if (trainerPercent < 70) {
+            return "写真の色を3Dの形に合わせています…";
+        }
+        if (trainerPercent < 90) {
+            return "複数の角度の写真をまとめています…";
+        }
+        return "3Dモデルを仕上げています…";
+    }
+
+    private static void notifyProgress(ProgressListener listener, int percent, String message) {
+        if (listener != null) {
+            listener.onProgress(Math.max(0, Math.min(100, percent)), message);
         }
     }
 
