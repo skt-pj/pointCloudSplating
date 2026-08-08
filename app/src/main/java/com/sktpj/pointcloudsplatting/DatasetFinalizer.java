@@ -190,7 +190,8 @@ public final class DatasetFinalizer {
         return out.toString();
     }
 
-    private static void writeJson(File file, JSONObject json) throws IOException {
+    private static void writeJson(File file, JSONObject json)
+            throws IOException, JSONException {
         try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(json.toString(2).getBytes(StandardCharsets.UTF_8));
         }
