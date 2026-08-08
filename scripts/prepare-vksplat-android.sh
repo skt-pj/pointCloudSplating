@@ -97,7 +97,6 @@ if [[ -z "$SLANGC" ]]; then
 fi
 if [[ -z "$SLANGC" ]]; then
   echo "slangc not found after extracting Slang $SLANG_VERSION" >&2
-  find "$SLANG_ROOT" -maxdepth 3 -type f | head -n 50 >&2
   exit 1
 fi
 chmod +x "$SLANGC"
@@ -110,7 +109,11 @@ if [[ ! -x "$GLSLC" ]]; then
 fi
 
 pushd "$THIRD/vksplat" >/dev/null
-python3 compile_shaders.py --force --slangc "$SLANGC" --glslc "$GLSLC"
+# Do not force the desktop GLSL radix-sort shaders through Android NDK glslc. Their source uses
+# GL_ARB_shading_language_include, while the pinned upstream repository already ships matching
+# Vulkan SPIR-V. The config.slang checksum changed above, so all affected differentiable 3DGS
+# Slang kernels are still rebuilt with the mobile emulation defines.
+python3 compile_shaders.py --slangc "$SLANGC" --glslc "$GLSLC"
 popd >/dev/null
 
 cp -R "$THIRD/vksplat/vksplat/shader/." "$ASSET_DIR/"
