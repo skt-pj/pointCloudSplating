@@ -362,9 +362,9 @@ public final class DatasetCaptureManager {
                 continue;
             }
 
-            iterator.remove();
-            stillMetadata.remove(imageTimestamp);
             if (!isStillSharpEnough(metadata)) {
+                iterator.remove();
+                stillMetadata.remove(imageTimestamp);
                 lastDecision = "discarded photo: exposure/focus quality gate";
                 DiagnosticLog.w(TAG,
                         "Discarding texture photo quality gate ts=" + imageTimestamp
@@ -375,16 +375,42 @@ public final class DatasetCaptureManager {
             PoseSample pose = findNearestPoseLocked(imageTimestamp);
             if (pose == null
                     || Math.abs(pose.timestampNs - imageTimestamp) > MAX_POSE_MATCH_DELTA_NS) {
+                iterator.remove();
+                stillMetadata.remove(imageTimestamp);
                 lastDecision = "discarded photo: no synchronized ARCore pose";
-                DiagnosticLog.w(TAG, "No close pose for JPEG ts=" + imageTimestamp);
+                long deltaNs = pose == null ? Long.MAX_VALUE : pose.timestampNs - imageTimestamp;
+                DiagnosticLog.w(TAG,
+                        "No close pose for JPEG ts=" + imageTimestamp
+                                + " nearestDeltaMs="
+                                + (deltaNs == Long.MAX_VALUE
+                                ? "none"
+                                : String.format(Locale.US, "%.3f", deltaNs / 1_000_000.0)));
+                continue;
+            }
+
+            // ScannerActivity records the AR pose before it records Raw Depth for the same ARCore
+            // frame. Do not reject the JPEG from onArFrame() using only older depth samples; wait
+            // until Raw Depth has advanced to the JPEG timestamp, then choose the nearest sample.
+            if (depthSamples.isEmpty()
+                    || depthSamples.peekLast().getTimestampNs() < imageTimestamp) {
+                lastDecision = "waiting for synchronized Raw Depth";
                 continue;
             }
 
             WorldPointCloudSnapshot cloud = findNearestDepthLocked(imageTimestamp);
+            iterator.remove();
+            stillMetadata.remove(imageTimestamp);
             if (cloud == null
                     || Math.abs(cloud.getTimestampNs() - imageTimestamp) > MAX_DEPTH_MATCH_DELTA_NS) {
                 lastDecision = "discarded photo: no synchronized Raw Depth";
-                DiagnosticLog.w(TAG, "No close Raw Depth for JPEG ts=" + imageTimestamp);
+                long deltaNs = cloud == null
+                        ? Long.MAX_VALUE : cloud.getTimestampNs() - imageTimestamp;
+                DiagnosticLog.w(TAG,
+                        "No close Raw Depth for JPEG ts=" + imageTimestamp
+                                + " nearestDeltaMs="
+                                + (deltaNs == Long.MAX_VALUE
+                                ? "none"
+                                : String.format(Locale.US, "%.3f", deltaNs / 1_000_000.0)));
                 continue;
             }
 
