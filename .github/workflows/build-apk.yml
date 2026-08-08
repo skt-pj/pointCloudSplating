@@ -43,6 +43,7 @@ jobs:
         run: |
           chmod +x scripts/prepare-vksplat-android.sh
           scripts/prepare-vksplat-android.sh
+          python3 scripts/patch-vksplat-cumsum-android.py
 
       - uses: gradle/actions/setup-gradle@v4
         with:
