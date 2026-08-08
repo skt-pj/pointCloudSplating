@@ -20,5 +20,17 @@ precision mediump float;
 varying vec4 v_Color;
 
 void main() {
-    gl_FragColor = v_Color;
+    vec2 centered = gl_PointCoord - vec2(0.5);
+    float radius = length(centered);
+    if (radius > 0.5) {
+        discard;
+    }
+
+    // Preserve the sampled RGB in the center, but draw a dark ring so points remain visible when
+    // they are geometrically aligned with the identical live camera pixels behind them.
+    if (radius > 0.32) {
+        gl_FragColor = vec4(0.02, 0.02, 0.02, 1.0);
+    } else {
+        gl_FragColor = vec4(min(v_Color.rgb * 1.15 + vec3(0.05), vec3(1.0)), 1.0);
+    }
 }
