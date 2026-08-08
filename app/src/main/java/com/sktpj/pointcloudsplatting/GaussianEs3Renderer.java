@@ -20,8 +20,24 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private static final String TAG = "GaussianViewer";
     private static final float MIN_DISPLAY_SCALE = 0.05f;
     private static final float MAX_DISPLAY_SCALE = 3.0f;
-    private static final int INSTANCE_FLOATS = 23;
+    // position(3) + evaluated SH3 RGBA(4) + anisotropic scale(3) + quaternion(4)
+    private static final int INSTANCE_FLOATS = 14;
     private static final int INSTANCE_STRIDE_BYTES = INSTANCE_FLOATS * Float.BYTES;
+
+    private static final float SH_C0 = 0.28209479177387814f;
+    private static final float SH_C1 = 0.4886025119029199f;
+    private static final float SH_C2_0 = 1.0925484305920792f;
+    private static final float SH_C2_1 = -1.0925484305920792f;
+    private static final float SH_C2_2 = 0.31539156525252005f;
+    private static final float SH_C2_3 = -1.0925484305920792f;
+    private static final float SH_C2_4 = 0.5462742152960396f;
+    private static final float SH_C3_0 = -0.5900435899266435f;
+    private static final float SH_C3_1 = 2.890611442640554f;
+    private static final float SH_C3_2 = -0.4570457994644658f;
+    private static final float SH_C3_3 = 0.3731763325901154f;
+    private static final float SH_C3_4 = -0.4570457994644658f;
+    private static final float SH_C3_5 = 1.445305721320277f;
+    private static final float SH_C3_6 = -0.5900435899266435f;
 
     private static final float[] QUAD_CORNERS = {
             -1f, -1f,
@@ -37,15 +53,11 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                     + "precision highp float;\n"
                     + "in vec2 a_Corner;\n"
                     + "in vec3 a_Position;\n"
-                    + "in vec4 a_DcAlpha;\n"
-                    + "in vec3 a_ShR;\n"
-                    + "in vec3 a_ShG;\n"
-                    + "in vec3 a_ShB;\n"
+                    + "in vec4 a_ColorAlpha;\n"
                     + "in vec3 a_Scale;\n"
                     + "in vec4 a_Rotation;\n"
                     + "uniform mat4 u_View;\n"
                     + "uniform mat4 u_Projection;\n"
-                    + "uniform vec3 u_Camera;\n"
                     + "uniform vec2 u_PixelNdc;\n"
                     + "uniform float u_SizeScale;\n"
                     + "out vec4 v_Color;\n"
@@ -91,26 +103,15 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                     + "  float l1 = max(1e-10, 0.5*(trace + disc));\n"
                     + "  float l2 = max(1e-10, 0.5*(trace - disc));\n"
                     + "  vec2 e1;\n"
-                    + "  if (abs(cxy) > 1e-10) {\n"
-                    + "    e1 = normalize(vec2(cxy, l1-cxx));\n"
-                    + "  } else {\n"
-                    + "    e1 = cxx >= cyy ? vec2(1.0,0.0) : vec2(0.0,1.0);\n"
-                    + "  }\n"
+                    + "  if (abs(cxy) > 1e-10) e1 = normalize(vec2(cxy, l1-cxx));\n"
+                    + "  else e1 = cxx >= cyy ? vec2(1.0,0.0) : vec2(0.0,1.0);\n"
                     + "  vec2 e2 = vec2(-e1.y, e1.x);\n"
                     + "  vec2 offsetNdc = (e1*sqrt(l1)*a_Corner.x + e2*sqrt(l2)*a_Corner.y)\n"
                     + "      * (3.0*u_SizeScale);\n"
                     + "  vec4 clip = u_Projection * viewCenter;\n"
                     + "  clip.xy += offsetNdc * clip.w;\n"
                     + "  gl_Position = clip;\n"
-                    + "  vec3 d = normalize(a_Position - u_Camera);\n"
-                    + "  const float c0 = 0.2820947918;\n"
-                    + "  const float c1 = 0.4886025119;\n"
-                    + "  vec3 basis = vec3(-c1*d.y, c1*d.z, -c1*d.x);\n"
-                    + "  vec3 rgb = vec3(\n"
-                    + "    0.5 + c0*a_DcAlpha.r + dot(a_ShR,basis),\n"
-                    + "    0.5 + c0*a_DcAlpha.g + dot(a_ShG,basis),\n"
-                    + "    0.5 + c0*a_DcAlpha.b + dot(a_ShB,basis));\n"
-                    + "  v_Color = vec4(clamp(rgb,0.0,1.0), clamp(a_DcAlpha.a,0.001,0.999));\n"
+                    + "  v_Color = a_ColorAlpha;\n"
                     + "  v_GaussianCoord = a_Corner * 3.0;\n"
                     + "}\n";
 
@@ -135,15 +136,11 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private int instanceVbo;
     private int cornerLocation;
     private int positionLocation;
-    private int dcAlphaLocation;
-    private int shRLocation;
-    private int shGLocation;
-    private int shBLocation;
+    private int colorAlphaLocation;
     private int scaleLocation;
     private int rotationLocation;
     private int viewLocation;
     private int projectionLocation;
-    private int cameraLocation;
     private int pixelNdcLocation;
     private int sizeScaleLocation;
     private int width = 1;
@@ -183,15 +180,11 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
 
             cornerLocation = requireAttribute("a_Corner");
             positionLocation = requireAttribute("a_Position");
-            dcAlphaLocation = requireAttribute("a_DcAlpha");
-            shRLocation = requireAttribute("a_ShR");
-            shGLocation = requireAttribute("a_ShG");
-            shBLocation = requireAttribute("a_ShB");
+            colorAlphaLocation = requireAttribute("a_ColorAlpha");
             scaleLocation = requireAttribute("a_Scale");
             rotationLocation = requireAttribute("a_Rotation");
             viewLocation = requireUniform("u_View");
             projectionLocation = requireUniform("u_Projection");
-            cameraLocation = requireUniform("u_Camera");
             pixelNdcLocation = requireUniform("u_PixelNdc");
             sizeScaleLocation = requireUniform("u_SizeScale");
 
@@ -221,7 +214,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                             + " version=" + GLES30.glGetString(GLES30.GL_VERSION)
                             + " vendor=" + GLES30.glGetString(GLES30.GL_VENDOR)
                             + " viewer=ANISOTROPIC_COVARIANCE_SORTED_ES3"
-                            + " appearance=JPEG_SH1");
+                            + " appearance=SH0_SH3_CPU_VIEW_EVAL");
         } catch (RuntimeException e) {
             program = 0;
             DiagnosticLog.e(TAG, "Viewer GL initialization failed", e);
@@ -242,9 +235,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     public void onDrawFrame(GL10 gl) {
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT);
         GaussianModel current = model;
-        if (current == null || current.gaussianCount == 0 || program == 0) {
-            return;
-        }
+        if (current == null || current.gaussianCount == 0 || program == 0) return;
 
         float yaw;
         float pitch;
@@ -271,55 +262,33 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
 
         float[] view = new float[16];
         float[] projection = new float[16];
-        Matrix.setLookAtM(
-                view, 0,
-                eyeX, eyeY, eyeZ,
-                0f, 0f, 0f,
-                0f, 1f, 0f);
+        Matrix.setLookAtM(view, 0, eyeX, eyeY, eyeZ, 0f, 0f, 0f, 0f, 1f, 0f);
         Matrix.perspectiveM(
-                projection, 0,
-                55f,
-                (float) width / (float) height,
-                0.05f,
-                30f);
+                projection, 0, 55f, (float) width / (float) height, 0.05f, 30f);
 
         GLES30.glUseProgram(program);
         GLES30.glUniformMatrix4fv(viewLocation, 1, false, view, 0);
         GLES30.glUniformMatrix4fv(projectionLocation, 1, false, projection, 0);
-        GLES30.glUniform3f(cameraLocation, eyeX, eyeY, eyeZ);
-        GLES30.glUniform2f(
-                pixelNdcLocation,
-                2f / Math.max(1, width),
-                2f / Math.max(1, height));
+        GLES30.glUniform2f(pixelNdcLocation, 2f / Math.max(1, width), 2f / Math.max(1, height));
         GLES30.glUniform1f(sizeScaleLocation, sizeScale);
 
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, cornerVbo);
         GLES30.glEnableVertexAttribArray(cornerLocation);
-        GLES30.glVertexAttribPointer(
-                cornerLocation, 2, GLES30.GL_FLOAT, false, 2 * Float.BYTES, 0);
+        GLES30.glVertexAttribPointer(cornerLocation, 2, GLES30.GL_FLOAT, false,
+                2 * Float.BYTES, 0);
         GLES30.glVertexAttribDivisor(cornerLocation, 0);
 
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, instanceVbo);
         bindInstance(positionLocation, 3, 0);
-        bindInstance(dcAlphaLocation, 4, 3);
-        bindInstance(shRLocation, 3, 7);
-        bindInstance(shGLocation, 3, 10);
-        bindInstance(shBLocation, 3, 13);
-        bindInstance(scaleLocation, 3, 16);
-        bindInstance(rotationLocation, 4, 19);
+        bindInstance(colorAlphaLocation, 4, 3);
+        bindInstance(scaleLocation, 3, 7);
+        bindInstance(rotationLocation, 4, 10);
 
-        GLES30.glDrawArraysInstanced(
-                GLES30.GL_TRIANGLES,
-                0,
-                6,
-                current.gaussianCount);
+        GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLES, 0, 6, current.gaussianCount);
 
         disableAttribute(cornerLocation);
         disableInstance(positionLocation);
-        disableInstance(dcAlphaLocation);
-        disableInstance(shRLocation);
-        disableInstance(shGLocation);
-        disableInstance(shBLocation);
+        disableInstance(colorAlphaLocation);
         disableInstance(scaleLocation);
         disableInstance(rotationLocation);
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
@@ -328,9 +297,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         if (error != GLES30.GL_NO_ERROR) {
             if (!drawErrorReported) {
                 drawErrorReported = true;
-                DiagnosticLog.e(
-                        TAG,
-                        "Viewer draw failed glError=0x" + Integer.toHexString(error));
+                DiagnosticLog.e(TAG, "Viewer draw failed glError=0x" + Integer.toHexString(error));
                 statusListener.onStatus(
                         "3Dモデルを描画できませんでした\n戻って診断情報をコピーしてください");
             }
@@ -345,9 +312,8 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                             Locale.US,
                             "First model draw succeeded gaussians=%d sizeScale=%.3f "
                                     + "viewer=ANISOTROPIC_COVARIANCE_SORTED_ES3 "
-                                    + "appearance=JPEG_SH1 alpha=BACK_TO_FRONT",
-                            current.gaussianCount,
-                            sizeScale));
+                                    + "appearance=SH0_SH3_CPU_VIEW_EVAL alpha=BACK_TO_FRONT",
+                            current.gaussianCount, sizeScale));
             statusListener.onStatus(
                     "3Dモデルを表示中\nドラッグで回転 / ピンチで拡大・縮小");
         }
@@ -356,12 +322,8 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private void bindInstance(int location, int size, int floatOffset) {
         GLES30.glEnableVertexAttribArray(location);
         GLES30.glVertexAttribPointer(
-                location,
-                size,
-                GLES30.GL_FLOAT,
-                false,
-                INSTANCE_STRIDE_BYTES,
-                floatOffset * Float.BYTES);
+                location, size, GLES30.GL_FLOAT, false,
+                INSTANCE_STRIDE_BYTES, floatOffset * Float.BYTES);
         GLES30.glVertexAttribDivisor(location, 1);
     }
 
@@ -374,11 +336,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         GLES30.glDisableVertexAttribArray(location);
     }
 
-    private void uploadSortedInstances(
-            GaussianModel current,
-            float eyeX,
-            float eyeY,
-            float eyeZ) {
+    private void uploadSortedInstances(GaussianModel current, float eyeX, float eyeY, float eyeZ) {
         int count = current.gaussianCount;
         int neededFloats = count * INSTANCE_FLOATS;
         if (uploadBuffer == null || uploadBuffer.capacity() < neededFloats) {
@@ -386,8 +344,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         }
         uploadBuffer.clear();
 
-        float eyeLen = (float) Math.sqrt(
-                eyeX * eyeX + eyeY * eyeY + eyeZ * eyeZ);
+        float eyeLen = (float) Math.sqrt(eyeX * eyeX + eyeY * eyeY + eyeZ * eyeZ);
         float invEye = eyeLen > 1e-6f ? 1f / eyeLen : 1f;
         float forwardX = -eyeX * invEye;
         float forwardY = -eyeY * invEye;
@@ -405,28 +362,17 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         }
         sortByDepthDescending(indices, depths, 0, count - 1);
 
+        float[] rgb = new float[3];
         for (int sorted = 0; sorted < count; sorted++) {
             int i = indices[sorted];
             int p = i * 3;
-            int s = i * 9;
             int r = i * 4;
+            evaluateSh3(current, i, eyeX, eyeY, eyeZ, rgb);
             uploadBuffer
                     .put(current.positions[p])
                     .put(current.positions[p + 1])
                     .put(current.positions[p + 2])
-                    .put(current.dc[p])
-                    .put(current.dc[p + 1])
-                    .put(current.dc[p + 2])
-                    .put(current.alpha[i])
-                    .put(current.sh1[s])
-                    .put(current.sh1[s + 1])
-                    .put(current.sh1[s + 2])
-                    .put(current.sh1[s + 3])
-                    .put(current.sh1[s + 4])
-                    .put(current.sh1[s + 5])
-                    .put(current.sh1[s + 6])
-                    .put(current.sh1[s + 7])
-                    .put(current.sh1[s + 8])
+                    .put(rgb[0]).put(rgb[1]).put(rgb[2]).put(current.alpha[i])
                     .put(current.scales[p])
                     .put(current.scales[p + 1])
                     .put(current.scales[p + 2])
@@ -445,26 +391,69 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                 GLES30.GL_STREAM_DRAW);
         GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
 
-        DiagnosticLog.i(
-                TAG,
-                "Sorted/uploaded " + count + " anisotropic Gaussians for current view");
+        DiagnosticLog.i(TAG,
+                "Sorted/uploaded " + count
+                        + " anisotropic Gaussians with SH3 appearance for current view");
     }
 
-    private static void sortByDepthDescending(
-            int[] indices,
-            float[] depths,
-            int left,
-            int right) {
+    /** Standard 3DGS real spherical-harmonics basis through degree 3. */
+    private static void evaluateSh3(
+            GaussianModel model, int gaussian, float eyeX, float eyeY, float eyeZ, float[] outRgb) {
+        int p = gaussian * 3;
+        float x = model.positions[p] - eyeX;
+        float y = model.positions[p + 1] - eyeY;
+        float z = model.positions[p + 2] - eyeZ;
+        float len = (float) Math.sqrt(x * x + y * y + z * z);
+        if (len > 1e-8f) {
+            float inv = 1f / len;
+            x *= inv; y *= inv; z *= inv;
+        } else {
+            x = 0f; y = 0f; z = 1f;
+        }
+
+        float xx = x * x;
+        float yy = y * y;
+        float zz = z * z;
+        float xy = x * y;
+        float yz = y * z;
+        float xz = x * z;
+        float[] basis = new float[] {
+                -SH_C1 * y,
+                 SH_C1 * z,
+                -SH_C1 * x,
+                 SH_C2_0 * xy,
+                 SH_C2_1 * yz,
+                 SH_C2_2 * (2f * zz - xx - yy),
+                 SH_C2_3 * xz,
+                 SH_C2_4 * (xx - yy),
+                 SH_C3_0 * y * (3f * xx - yy),
+                 SH_C3_1 * xy * z,
+                 SH_C3_2 * y * (4f * zz - xx - yy),
+                 SH_C3_3 * z * (2f * zz - 3f * xx - 3f * yy),
+                 SH_C3_4 * x * (4f * zz - xx - yy),
+                 SH_C3_5 * z * (xx - yy),
+                 SH_C3_6 * x * (xx - 3f * yy)
+        };
+
+        int shBase = gaussian * GaussianModel.SH_REST_FLOATS;
+        for (int channel = 0; channel < 3; channel++) {
+            float value = 0.5f + SH_C0 * model.dc[p + channel];
+            int channelBase = shBase + channel * GaussianModel.SH_REST_PER_CHANNEL;
+            for (int i = 0; i < GaussianModel.SH_REST_PER_CHANNEL; i++) {
+                value += model.shRest[channelBase + i] * basis[i];
+            }
+            outRgb[channel] = clamp(value, 0f, 1f);
+        }
+    }
+
+    private static void sortByDepthDescending(int[] indices, float[] depths, int left, int right) {
+        if (left >= right) return;
         int i = left;
         int j = right;
         float pivot = depths[indices[(left + right) >>> 1]];
         while (i <= j) {
-            while (i <= right && depths[indices[i]] > pivot) {
-                i++;
-            }
-            while (j >= left && depths[indices[j]] < pivot) {
-                j--;
-            }
+            while (i <= right && depths[indices[i]] > pivot) i++;
+            while (j >= left && depths[indices[j]] < pivot) j--;
             if (i <= j) {
                 int temp = indices[i];
                 indices[i] = indices[j];
@@ -473,12 +462,8 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                 j--;
             }
         }
-        if (left < j) {
-            sortByDepthDescending(indices, depths, left, j);
-        }
-        if (i < right) {
-            sortByDepthDescending(indices, depths, i, right);
-        }
+        if (left < j) sortByDepthDescending(indices, depths, left, j);
+        if (i < right) sortByDepthDescending(indices, depths, i, right);
     }
 
     void setModel(GaussianModel model) {
@@ -502,18 +487,16 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
 
     synchronized void rotate(float dxDegrees, float dyDegrees) {
         yawDegrees = (yawDegrees - dxDegrees) % 360f;
-        pitchDegrees = Math.max(
-                -85f,
-                Math.min(85f, pitchDegrees - dyDegrees));
+        pitchDegrees = Math.max(-85f, Math.min(85f, pitchDegrees - dyDegrees));
         sortedUploadDirty = true;
     }
 
     synchronized void zoom(float scaleFactor) {
-        if (model == null || !Float.isFinite(scaleFactor) || scaleFactor <= 0f) {
-            return;
-        }
+        if (model == null || !Float.isFinite(scaleFactor) || scaleFactor <= 0f) return;
         distance /= scaleFactor;
         distance = Math.max(0.8f, Math.min(12f, distance));
+        // SH appearance is view-dependent, so camera distance changes must refresh evaluated color.
+        sortedUploadDirty = true;
     }
 
     synchronized void resetCamera() {
@@ -525,17 +508,13 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
 
     private int requireAttribute(String name) {
         int location = GLES30.glGetAttribLocation(program, name);
-        if (location < 0) {
-            throw new IllegalStateException("missing viewer attribute " + name);
-        }
+        if (location < 0) throw new IllegalStateException("missing viewer attribute " + name);
         return location;
     }
 
     private int requireUniform(String name) {
         int location = GLES30.glGetUniformLocation(program, name);
-        if (location < 0) {
-            throw new IllegalStateException("missing viewer uniform " + name);
-        }
+        if (location < 0) throw new IllegalStateException("missing viewer uniform " + name);
         return location;
     }
 
@@ -550,17 +529,16 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         GLES30.glShaderSource(shader, source);
         GLES30.glCompileShader(shader);
         int[] compiled = new int[1];
-        GLES30.glGetShaderiv(
-                shader,
-                GLES30.GL_COMPILE_STATUS,
-                compiled,
-                0);
+        GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, compiled, 0);
         if (compiled[0] == 0) {
             String error = GLES30.glGetShaderInfoLog(shader);
             GLES30.glDeleteShader(shader);
-            throw new IllegalStateException(
-                    "viewer shader compile failed: " + error);
+            throw new IllegalStateException("viewer shader compile failed: " + error);
         }
         return shader;
+    }
+
+    private static float clamp(float value, float low, float high) {
+        return Math.max(low, Math.min(high, value));
     }
 }
