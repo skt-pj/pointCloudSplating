@@ -6,6 +6,10 @@ android {
     namespace 'com.sktpj.pointcloudsplatting'
     compileSdk 35
 
+    buildFeatures {
+        buildConfig true
+    }
+
     signingConfigs {
         devStable {
             storeFile rootProject.file('ci/pointcloud-dev.jks')
