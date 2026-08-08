@@ -15,8 +15,6 @@ git clone -q https://github.com/harry7557558/vksplat.git "$THIRD/vksplat"
 git -C "$THIRD/vksplat" checkout -q "$VKSPLAT_COMMIT"
 git clone -q --depth 1 --branch 0.9.9.8 https://github.com/g-truc/glm.git "$THIRD/glm"
 
-# Mobile GPUs do not consistently expose shaderInt64 or VK_EXT_shader_atomic_float.
-# VkSplat already ships emulation paths; compile the packaged SPIR-V with both enabled.
 python3 - "$THIRD/vksplat/vksplat/slang/config.slang" <<'PY'
 from pathlib import Path
 import sys
@@ -27,8 +25,6 @@ s = s.replace('#define USE_EMULATED_F32_ATOMIC 0', '#define USE_EMULATED_F32_ATO
 p.write_text(s)
 PY
 
-# The desktop source unconditionally enables optional device extensions even when the emulation
-# shaders do not need them. Android must not request extensions that the phone does not expose.
 python3 - "$THIRD/vksplat/vksplat/src/gs_pipeline.cpp" <<'PY'
 from pathlib import Path
 import sys
@@ -49,8 +45,7 @@ old = '''    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float_features 
 
     VkDeviceCreateInfo create_info = {};
 '''
-new = '''    // Android build uses emulated Int64/F32 atomic shaders and the native subgroup size.
-    // Do not require optional desktop extensions at vkCreateDevice time.
+new = '''    // Android uses emulation shaders; optional desktop Vulkan extensions are not required.
     VkDeviceCreateInfo create_info = {};
 '''
 if old not in s:
@@ -67,9 +62,6 @@ s = s.replace('''    std::vector<const char*> device_extensions = {
     create_info.ppEnabledExtensionNames = nullptr;
     create_info.pNext = nullptr;
 ''')
-# Required subgroup-size pNext also depends on VK_EXT_subgroup_size_control. The Pixel path uses
-# the physical device's native subgroup. If it is not 32, initialization reports it and fails
-# cleanly rather than requesting an unsupported extension.
 s = s.replace('''    if (compatible_subgroup_size && (
         deviceInfo.subgroupSize != SUBGROUP_SIZE ||
         deviceInfo.vendor == DeviceVendor::Intel_R_
@@ -81,8 +73,6 @@ s = s.replace('''    if (compatible_subgroup_size && (
 p.write_text(s)
 PY
 
-# Keep dataset coordinates in the app's saved root-anchor coordinate system. This is important for
-# later AR alignment and lets progressive stages reuse a previous PLY without an unknown transform.
 python3 - "$THIRD/vksplat/vksplat/src/gs_trainer.cpp" <<'PY'
 from pathlib import Path
 import sys
@@ -93,18 +83,25 @@ s = s.replace('dataparser_transform = ColmapReader::normalize_world_space(c2w_po
 p.write_text(s)
 PY
 
-# Turn VkSplat's guarded errors back into real exceptions so JNI can report failures rather than
-# silently continuing with invalid Vulkan objects.
 sed -i 's/#define ENABLE_ASSERTION 0/#define ENABLE_ASSERTION 1/' "$THIRD/vksplat/vksplat/src/config.h"
 
 SLANG_ROOT="$RUNNER_TEMP/slang-$SLANG_VERSION"
-if [[ ! -x "$SLANG_ROOT/bin/slangc" ]]; then
-  rm -rf "$SLANG_ROOT"
-  mkdir -p "$SLANG_ROOT"
-  curl -L --retry 3 -o "$RUNNER_TEMP/slang.tar.gz" \
-    "https://github.com/shader-slang/slang/releases/download/v$SLANG_VERSION/slang-$SLANG_VERSION-linux-x86_64-glibc-2.27.tar.gz"
-  tar -xzf "$RUNNER_TEMP/slang.tar.gz" -C "$SLANG_ROOT" --strip-components=1
+rm -rf "$SLANG_ROOT"
+mkdir -p "$SLANG_ROOT"
+curl -L --retry 3 -o "$RUNNER_TEMP/slang.tar.gz" \
+  "https://github.com/shader-slang/slang/releases/download/v$SLANG_VERSION/slang-$SLANG_VERSION-linux-x86_64-glibc-2.27.tar.gz"
+tar -xzf "$RUNNER_TEMP/slang.tar.gz" -C "$SLANG_ROOT"
+SLANGC="$(find "$SLANG_ROOT" -type f -name slangc -perm -u+x | head -n 1 || true)"
+if [[ -z "$SLANGC" ]]; then
+  SLANGC="$(find "$SLANG_ROOT" -type f -name slangc | head -n 1 || true)"
 fi
+if [[ -z "$SLANGC" ]]; then
+  echo "slangc not found after extracting Slang $SLANG_VERSION" >&2
+  find "$SLANG_ROOT" -maxdepth 3 -type f | head -n 50 >&2
+  exit 1
+fi
+chmod +x "$SLANGC"
+echo "Using slangc: $SLANGC"
 
 GLSLC="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}/shader-tools/linux-x86_64/glslc"
 if [[ ! -x "$GLSLC" ]]; then
@@ -113,7 +110,7 @@ if [[ ! -x "$GLSLC" ]]; then
 fi
 
 pushd "$THIRD/vksplat" >/dev/null
-python3 compile_shaders.py --force --slangc "$SLANG_ROOT/bin/slangc" --glslc "$GLSLC"
+python3 compile_shaders.py --force --slangc "$SLANGC" --glslc "$GLSLC"
 popd >/dev/null
 
 cp -R "$THIRD/vksplat/vksplat/shader/." "$ASSET_DIR/"
