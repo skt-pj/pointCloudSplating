@@ -50,9 +50,9 @@ public final class GaussianSplatJob {
             JSONObject transforms = new JSONObject(readText(transformsFile));
             JSONArray frames = transforms.getJSONArray("frames");
             int count = frames.length();
-            if (count < 8) {
+            if (count == 0) {
                 return new Result(false,
-                        "need at least 8 keyframes before starting 3DGS", count, 0, null);
+                        "no saved keyframes available for 3DGS", 0, 0, null);
             }
 
             File jobFile = new File(datasetDirectory, "3dgs_job.json");
