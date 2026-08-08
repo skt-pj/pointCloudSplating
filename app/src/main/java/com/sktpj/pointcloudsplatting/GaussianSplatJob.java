@@ -12,7 +12,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 
-/** Creates the handoff consumed by the future Android-native 3DGS trainer. */
+/** Validates a saved dataset and runs the bundled Android depth-prior 3DGS backend. */
 public final class GaussianSplatJob {
     private GaussianSplatJob() {}
 
@@ -20,21 +20,30 @@ public final class GaussianSplatJob {
         public final boolean success;
         public final String message;
         public final int frameCount;
+        public final int gaussianCount;
+        public final File outputFile;
 
-        private Result(boolean success, String message, int frameCount) {
+        private Result(
+                boolean success,
+                String message,
+                int frameCount,
+                int gaussianCount,
+                File outputFile) {
             this.success = success;
             this.message = message;
             this.frameCount = frameCount;
+            this.gaussianCount = gaussianCount;
+            this.outputFile = outputFile;
         }
     }
 
     public static Result prepare(File datasetDirectory) {
         if (datasetDirectory == null || !datasetDirectory.isDirectory()) {
-            return new Result(false, "dataset directory unavailable", 0);
+            return new Result(false, "dataset directory unavailable", 0, 0, null);
         }
         File transformsFile = new File(datasetDirectory, "transforms.json");
         if (!transformsFile.isFile()) {
-            return new Result(false, "transforms.json is missing; press Save first", 0);
+            return new Result(false, "transforms.json is missing; press Save first", 0, 0, null);
         }
 
         try {
@@ -43,32 +52,59 @@ public final class GaussianSplatJob {
             int count = frames.length();
             if (count < 8) {
                 return new Result(false,
-                        "need at least 8 keyframes before starting 3DGS", count);
+                        "need at least 8 keyframes before starting 3DGS", count, 0, null);
             }
 
+            File jobFile = new File(datasetDirectory, "3dgs_job.json");
             JSONObject job = new JSONObject();
-            job.put("format_version", 1);
-            job.put("status", "READY_FOR_ANDROID_NATIVE_TRAINER");
+            job.put("format_version", 2);
+            job.put("status", "RUNNING_ANDROID_DEPTH_PRIOR");
             job.put("requested_at_unix_ms", System.currentTimeMillis());
             job.put("frame_count", count);
             job.put("transforms", "transforms.json");
             job.put("rgb_pattern", "frame_*.jpg");
             job.put("depth_prior_pattern", "frame_*.ply");
             job.put("camera_convention", "OpenGL camera-to-world, root-anchor local");
-            job.put("backend", "android_native_backend_pending");
+            job.put("backend", "android_depth_prior_gaussian_v1");
+            job.put("photometric_optimization", false);
             job.put("note",
-                    "The capture/preprocessing handoff is ready. The native Vulkan 3DGS optimizer is not bundled in this build yet.");
+                    "This bundled backend fuses synchronized Raw Depth into a standard 3DGS PLY. "
+                            + "A future Vulkan optimizer can replace the backend without changing the dataset format.");
+            writeJson(jobFile, job);
 
-            try (FileOutputStream out = new FileOutputStream(
-                    new File(datasetDirectory, "3dgs_job.json"))) {
-                out.write(job.toString(2).getBytes(StandardCharsets.UTF_8));
+            GaussianSplatTrainer.Result training = GaussianSplatTrainer.train(
+                    datasetDirectory,
+                    (percent, message) -> DiagnosticLog.i(
+                            "GaussianSplatJob", percent + "% " + message));
+            if (!training.success) {
+                job.put("status", "FAILED");
+                job.put("error", training.message);
+                writeJson(jobFile, job);
+                return new Result(false, training.message, count, 0, null);
             }
-            return new Result(true,
-                    "3DGS input prepared; native trainer integration is next", count);
+
+            job.put("status", "COMPLETE");
+            job.put("completed_at_unix_ms", System.currentTimeMillis());
+            job.put("gaussian_count", training.gaussianCount);
+            job.put("output", training.outputFile.getName());
+            writeJson(jobFile, job);
+            return new Result(
+                    true,
+                    "3DGS splat generated: " + training.gaussianCount + " Gaussians",
+                    count,
+                    training.gaussianCount,
+                    training.outputFile);
         } catch (IOException | JSONException | RuntimeException e) {
-            DiagnosticLog.e("GaussianSplatJob", "Failed to prepare 3DGS job", e);
+            DiagnosticLog.e("GaussianSplatJob", "Failed to run 3DGS job", e);
             return new Result(false,
-                    "3DGS preparation failed: " + e.getClass().getSimpleName(), 0);
+                    "3DGS generation failed: " + e.getClass().getSimpleName(), 0, 0, null);
+        }
+    }
+
+    private static void writeJson(File file, JSONObject json)
+            throws IOException, JSONException {
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(json.toString(2).getBytes(StandardCharsets.UTF_8));
         }
     }
 
