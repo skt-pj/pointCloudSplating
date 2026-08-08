@@ -17,6 +17,8 @@
 
 namespace {
 constexpr const char* kTag = "Native3DGS";
+constexpr size_t kAndroidMaxTileIndices = 12'000'000;
+constexpr size_t kAndroidDensifySoftCap = 70'000;
 
 void logi(const std::string& text) {
     __android_log_print(ANDROID_LOG_INFO, kTag, "%s", text.c_str());
@@ -113,7 +115,10 @@ TrainerConfig makeConfig(const std::string& dataRoot,
     c.eval_interval = std::max(2, frameCount + 1); // first view is validation; all others train
     c.image_cache_device = TrainerConfig::CacheImage::CPU;
     c.global_scale = 1.0f;
-    c.init_scale = 1.0f;
+    // ARCore Raw Depth is substantially denser than the sparse COLMAP clouds VkSplat is tuned for.
+    // A full nearest-neighbour radius can make a few near/outlier splats cover most screen tiles,
+    // causing multi-gigabyte key/index buffers on Android unified memory before step 1.
+    c.init_scale = 0.25f;
     c.init_opacity = 0.10f;
     c.strategy = TrainerConfig::Strategy::Default;
 
@@ -146,7 +151,7 @@ TrainerConfig makeConfig(const std::string& dataRoot,
     c.noise_lr = 5e5f;
     c.min_opacity = 0.005f;
     c.grow_factor = 1.05f;
-    c.cap_max = 350000;
+    c.cap_max = 120000;
     return c;
 }
 
@@ -155,6 +160,14 @@ void processTiles(VulkanGSTrainer& trainer,
                   VulkanGSPipelineBuffers& buffers) {
     trainer.executeCalculateIndexBufferOffset(buffers);
     if (buffers.num_indices == 0) return;
+    if (buffers.num_indices > kAndroidMaxTileIndices) {
+        std::ostringstream error;
+        error << "projected tile overlap exceeds Android memory budget: indices="
+              << buffers.num_indices << " gaussians=" << buffers.num_splats
+              << " image=" << uniforms.image_width << "x" << uniforms.image_height;
+        loge(error.str());
+        throw std::runtime_error(error.str());
+    }
     trainer.executeGenerateKeys(uniforms, buffers);
     trainer.executeSort(uniforms, buffers, -1);
     trainer.executeComputeTileRanges(uniforms, buffers);
@@ -186,7 +199,11 @@ bool trainOneStep(VulkanGSTrainer& trainer,
     trainer.executeComputeSSIMGradient(config, uniforms, buffers, imageIndex);
     trainer.executeRasterizeBackward(uniforms, buffers);
     trainer.executeFusedProjectionBackwardOptimizerStep(config, uniforms, buffers, step + 1);
-    trainer.executeDefaultPostBackward(config, uniforms, buffers, step);
+    // The pinned Default strategy can grow without consulting cap_max. Let it refine the depth prior,
+    // but stop new duplicate/split allocations once the phone-sized working set has been reached.
+    if (buffers.num_splats < kAndroidDensifySoftCap) {
+        trainer.executeDefaultPostBackward(config, uniforms, buffers, step);
+    }
     return true;
 }
 
@@ -285,7 +302,10 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
         {
             std::ostringstream info;
             info << "Training start views=" << trainer.num_train() << " initial=" << buffers.num_splats
-                 << " steps=" << trainSteps << " loss=L1+SSIM densityControl=default";
+                 << " steps=" << trainSteps << " loss=L1+SSIM densityControl=default"
+                 << " initScale=" << config.init_scale
+                 << " tileIndexLimit=" << kAndroidMaxTileIndices
+                 << " densifySoftCap=" << kAndroidDensifySoftCap;
             logi(info.str());
         }
 
@@ -305,6 +325,7 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
                 log << "step=" << (step + 1) << "/" << steps
                     << " optimized=" << optimizedSteps
                     << " gaussians=" << buffers.num_splats
+                    << " tileIndices=" << buffers.num_indices
                     << " activeSH=" << uniforms.active_sh;
                 logi(log.str());
             }
