@@ -23,6 +23,7 @@ import java.nio.FloatBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
@@ -81,10 +82,10 @@ public final class GaussianViewerActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         LinearOverlay overlay = new LinearOverlay(this);
-        Button back = overlay.button("戻る", v -> finish());
+        overlay.button("戻る", v -> finish());
         statusView = overlay.status();
-        statusView.setText("3DGSを読み込んでいます...\nドラッグ: 回転 / ピンチ: ズーム");
-        Button reset = overlay.button("リセット", v -> renderer.resetCamera());
+        statusView.setText("Gaussianを読み込んでいます...\nドラッグ: 回転 / ピンチ: ズーム");
+        overlay.button("リセット", v -> renderer.resetCamera());
 
         FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, dp(60));
@@ -132,13 +133,13 @@ public final class GaussianViewerActivity extends Activity {
                 renderer.setModel(model);
                 runOnUiThread(() -> statusView.setText(
                         String.format(Locale.US,
-                                "%,d Gaussians\nドラッグ: 回転 / ピンチ: ズーム",
+                                "%,d Gaussians / auto-fit\nドラッグ: 回転 / ピンチ: ズーム",
                                 model.count)));
             } catch (Exception e) {
                 DiagnosticLog.e("GaussianViewer", "Failed to load splat.ply", e);
                 runOnUiThread(() -> {
-                    statusView.setText("3DGS読込失敗: " + e.getMessage());
-                    Toast.makeText(this, "3DGSを表示できません", Toast.LENGTH_LONG).show();
+                    statusView.setText("Gaussian読込失敗: " + e.getMessage());
+                    Toast.makeText(this, "Gaussianを表示できません", Toast.LENGTH_LONG).show();
                 });
             }
         }, "LoadGaussianPly").start();
@@ -188,8 +189,9 @@ public final class GaussianViewerActivity extends Activity {
             Button button = new Button(activity);
             button.setText(text);
             button.setOnClickListener(listener);
+            int widthDp = activity.getResources().getDisplayMetrics().densityDpi >= 320 ? 108 : 92;
             root.addView(button, new android.widget.LinearLayout.LayoutParams(
-                    activity.getResources().getDisplayMetrics().densityDpi >= 320 ? 108 : 92,
+                    Math.round(widthDp * activity.getResources().getDisplayMetrics().density),
                     android.widget.LinearLayout.LayoutParams.MATCH_PARENT));
             return button;
         }
@@ -216,7 +218,7 @@ public final class GaussianViewerActivity extends Activity {
                         + "void main() {\n"
                         + "  vec4 clip = u_Mvp * vec4(a_Position, 1.0);\n"
                         + "  gl_Position = clip;\n"
-                        + "  gl_PointSize = clamp(a_Size * u_PointScale / max(0.05, clip.w), 1.5, 42.0);\n"
+                        + "  gl_PointSize = clamp(a_Size * u_PointScale / max(0.05, clip.w), 2.0, 48.0);\n"
                         + "  v_Color = a_Color;\n"
                         + "}\n";
 
@@ -314,8 +316,8 @@ public final class GaussianViewerActivity extends Activity {
                     0f, 1f, 0f);
             float aspect = (float) width / (float) height;
             Matrix.perspectiveM(projection, 0, 60f, aspect,
-                    Math.max(0.005f, current.radius * 0.01f),
-                    Math.max(10f, current.radius * 50f));
+                    Math.max(0.003f, current.radius * 0.01f),
+                    Math.max(10f, current.radius * 30f));
             Matrix.multiplyMM(mvp, 0, projection, 0, view, 0);
 
             GLES20.glUseProgram(program);
@@ -344,7 +346,7 @@ public final class GaussianViewerActivity extends Activity {
         void setModel(ModelData model) {
             this.model = model;
             synchronized (this) {
-                baseDistance = Math.max(model.radius * 2.4f, 0.25f);
+                baseDistance = Math.max(model.radius * 2.35f, 0.18f);
                 distance = baseDistance;
                 yawDegrees = 0f;
                 pitchDegrees = 0f;
@@ -362,8 +364,8 @@ public final class GaussianViewerActivity extends Activity {
                 return;
             }
             distance /= scaleFactor;
-            distance = Math.max(current.radius * 0.25f,
-                    Math.min(current.radius * 20f, distance));
+            distance = Math.max(current.radius * 0.20f,
+                    Math.min(current.radius * 18f, distance));
         }
 
         synchronized void resetCamera() {
@@ -419,6 +421,7 @@ public final class GaussianViewerActivity extends Activity {
 
     private static final class GaussianPlyReader {
         private static final float SH_C0 = 0.28209479177387814f;
+        private static final int ROBUST_SAMPLE_LIMIT = 8192;
 
         static ModelData read(File file) throws IOException {
             try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
@@ -456,12 +459,13 @@ public final class GaussianViewerActivity extends Activity {
                 FloatBuffer colors = directFloats(header.vertexCount * 4);
                 FloatBuffer sizes = directFloats(header.vertexCount);
 
-                float minX = Float.POSITIVE_INFINITY;
-                float minY = Float.POSITIVE_INFINITY;
-                float minZ = Float.POSITIVE_INFINITY;
-                float maxX = Float.NEGATIVE_INFINITY;
-                float maxY = Float.NEGATIVE_INFINITY;
-                float maxZ = Float.NEGATIVE_INFINITY;
+                int sampleStride = Math.max(1, header.vertexCount / ROBUST_SAMPLE_LIMIT);
+                int sampleCapacity = Math.min(header.vertexCount,
+                        (header.vertexCount + sampleStride - 1) / sampleStride);
+                float[] sampleX = new float[sampleCapacity];
+                float[] sampleY = new float[sampleCapacity];
+                float[] sampleZ = new float[sampleCapacity];
+                int sampleCount = 0;
                 float[] values = new float[header.properties.size()];
 
                 for (int i = 0; i < header.vertexCount; i++) {
@@ -475,12 +479,12 @@ public final class GaussianViewerActivity extends Activity {
                         x = y = z = 0f;
                     }
                     positions.put(x).put(y).put(z);
-                    minX = Math.min(minX, x);
-                    minY = Math.min(minY, y);
-                    minZ = Math.min(minZ, z);
-                    maxX = Math.max(maxX, x);
-                    maxY = Math.max(maxY, y);
-                    maxZ = Math.max(maxZ, z);
+                    if (i % sampleStride == 0 && sampleCount < sampleCapacity) {
+                        sampleX[sampleCount] = x;
+                        sampleY[sampleCount] = y;
+                        sampleZ[sampleCount] = z;
+                        sampleCount++;
+                    }
 
                     float red = rIndex >= 0 ? 0.5f + SH_C0 * values[rIndex] : 0.75f;
                     float green = gIndex >= 0 ? 0.5f + SH_C0 * values[gIndex] : 0.75f;
@@ -491,24 +495,48 @@ public final class GaussianViewerActivity extends Activity {
 
                     float worldScale = 0.012f;
                     if (sxIndex >= 0 && syIndex >= 0 && szIndex >= 0) {
-                        float averageLogScale =
-                                (values[sxIndex] + values[syIndex] + values[szIndex]) / 3f;
-                        worldScale = (float) Math.exp(averageLogScale) * 2.2f;
+                        float sx = (float) Math.exp(values[sxIndex]);
+                        float sy = (float) Math.exp(values[syIndex]);
+                        float sz = (float) Math.exp(values[szIndex]);
+                        worldScale = (float) Math.cbrt(Math.max(1e-12f, sx * sy * sz)) * 2.4f;
                     }
-                    sizes.put(Math.max(0.002f, Math.min(0.12f, worldScale)));
+                    sizes.put(Math.max(0.0025f, Math.min(0.14f, worldScale)));
                 }
                 positions.position(0);
                 colors.position(0);
                 sizes.position(0);
 
-                float centerX = (minX + maxX) * 0.5f;
-                float centerY = (minY + maxY) * 0.5f;
-                float centerZ = (minZ + maxZ) * 0.5f;
-                float dx = maxX - minX;
-                float dy = maxY - minY;
-                float dz = maxZ - minZ;
-                float radius = Math.max(0.05f,
-                        0.5f * (float) Math.sqrt(dx * dx + dy * dy + dz * dz));
+                if (sampleCount == 0) {
+                    throw new IOException("PLY has no finite sample positions");
+                }
+                float[] medianX = Arrays.copyOf(sampleX, sampleCount);
+                float[] medianY = Arrays.copyOf(sampleY, sampleCount);
+                float[] medianZ = Arrays.copyOf(sampleZ, sampleCount);
+                Arrays.sort(medianX);
+                Arrays.sort(medianY);
+                Arrays.sort(medianZ);
+                float centerX = medianX[sampleCount / 2];
+                float centerY = medianY[sampleCount / 2];
+                float centerZ = medianZ[sampleCount / 2];
+
+                float[] distances = new float[sampleCount];
+                for (int i = 0; i < sampleCount; i++) {
+                    float dx = sampleX[i] - centerX;
+                    float dy = sampleY[i] - centerY;
+                    float dz = sampleZ[i] - centerZ;
+                    distances[i] = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+                }
+                Arrays.sort(distances);
+                int percentileIndex = Math.min(sampleCount - 1,
+                        Math.max(0, Math.round((sampleCount - 1) * 0.99f)));
+                float radius = Math.max(0.05f, distances[percentileIndex] * 1.12f);
+                if (!Float.isFinite(radius) || radius <= 0f) {
+                    radius = 1f;
+                }
+                DiagnosticLog.i("GaussianViewer",
+                        String.format(Locale.US,
+                                "Loaded model count=%d robustCenter=(%.3f,%.3f,%.3f) radius99=%.3f",
+                                header.vertexCount, centerX, centerY, centerZ, radius));
                 return new ModelData(header.vertexCount, positions, colors, sizes,
                         centerX, centerY, centerZ, radius);
             }
