@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
 JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
+PREPARE = ROOT / "scripts/prepare-vksplat-android.sh"
 VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
 VENDORED_CUMSUM = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/slang/cumsum.slang"
 
@@ -64,6 +65,7 @@ def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
     java = JAVA.read_text(encoding="utf-8")
     patch = CUMSUM_PATCH.read_text(encoding="utf-8")
+    prepare = PREPARE.read_text(encoding="utf-8")
 
     require(native, "TrainerConfig::Strategy::MCMC", "density control must be budget-aware")
     require(native, "kGaussianBudget = 120'000", "Gaussian count must have an explicit budget")
@@ -98,6 +100,12 @@ def main() -> None:
     require(patch, "level1_uniforms", "three-level cumsum level 1 must use reduced count")
     require(patch, "level2_uniforms", "three-level cumsum level 2 must use reduced count")
     verify_cumsum_hierarchy()
+
+    patch_pos = prepare.find("python3 scripts/patch-vksplat-cumsum-android.py")
+    compile_pos = prepare.find("python3 compile_shaders.py")
+    if patch_pos < 0 or compile_pos < 0 or patch_pos >= compile_pos:
+        raise SystemExit(
+            "mobile trainer architecture check failed: cumsum source patch must run before shader compilation")
 
     if VENDORED_RENDERER.is_file():
         renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
