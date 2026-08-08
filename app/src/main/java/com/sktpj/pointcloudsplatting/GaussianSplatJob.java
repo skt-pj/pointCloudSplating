@@ -103,11 +103,23 @@ public final class GaussianSplatJob {
                 return Result.fail("以前の未完成データを更新できませんでした。", count);
             }
 
-            notifyProgress(listener, 4, "端末内で3Dモデルの学習を始めます…");
-            NativeGaussianTrainer.Result trained = NativeGaussianTrainer.train(
-                    context.getApplicationContext(),
-                    datasetDirectory,
-                    (percent, message) -> notifyProgress(listener, percent, message));
+            notifyProgress(listener, 3, "変換中のカメラとAR表示を停止しています…");
+            Context appContext = context.getApplicationContext();
+            if (!ModelProcessingCoordinator.enter(appContext)) {
+                return Result.fail("変換用画面を開始できなかったため、安全のため3D処理を開始しませんでした。", count);
+            }
+
+            NativeGaussianTrainer.Result trained;
+            try {
+                notifyProgress(listener, 4, "端末内で3Dモデルの学習を始めます…");
+                trained = NativeGaussianTrainer.train(
+                        appContext,
+                        datasetDirectory,
+                        (percent, message) -> notifyProgress(listener, percent, message));
+            } finally {
+                ModelProcessingCoordinator.exit();
+            }
+
             if (!trained.success) {
                 DiagnosticLog.w(TAG, "Full 3DGS failed: " + trained.message);
                 return Result.fail(trained.message, count);
@@ -137,6 +149,7 @@ public final class GaussianSplatJob {
             notifyProgress(listener, 100, "3Dモデルを作成しました");
             return Result.complete("3DGS学習完了", count, trained.gaussianCount, trained.outputFile);
         } catch (Exception e) {
+            ModelProcessingCoordinator.exit();
             DiagnosticLog.e(TAG, "Full 3DGS job failed", e);
             return Result.fail("3Dモデルの学習に失敗しました。", 0);
         }
@@ -202,7 +215,9 @@ public final class GaussianSplatJob {
     }
 
     private static void notifyProgress(ProgressListener listener, int percent, String message) {
-        if (listener != null) listener.onProgress(Math.max(0, Math.min(100, percent)), message);
+        int clamped = Math.max(0, Math.min(100, percent));
+        ModelProcessingCoordinator.publishProgress(clamped, message);
+        if (listener != null) listener.onProgress(clamped, message);
     }
 
     private static final class DatasetStats {
