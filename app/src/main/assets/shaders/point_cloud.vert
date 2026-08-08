@@ -29,5 +29,7 @@ void main() {
     v_Color = vec4(a_Color, 1.0);
     gl_Position = u_ModelViewProjection * vec4(a_Position.xyz, 1.0);
     gl_Position.w *= step(u_ConfidenceThreshold, a_Position.w);
-    gl_PointSize = u_PointSize;
+    // The RGB points line up with the live camera image and otherwise disappear visually into it.
+    // Use a larger sprite; the fragment shader draws a dark outline around the original RGB core.
+    gl_PointSize = max(8.0, u_PointSize);
 }
