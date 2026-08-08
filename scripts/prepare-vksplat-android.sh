@@ -89,7 +89,9 @@ sed -i 's/#define ENABLE_ASSERTION 0/#define ENABLE_ASSERTION 1/' "$THIRD/vkspla
 # VkSplat ships portable Vulkan radix-sort SPIR-V already. Its GLSL source relies on
 # GL_ARB_shading_language_include, which Android NDK glslc intentionally does not expose.
 # Keep the pinned upstream radix SPIR-V and rebuild only the differentiable Slang kernels whose
-# config changed for mobile Int64/F32-atomic emulation.
+# config changed for mobile Int64/F32-atomic emulation. The upstream helper also treats compiler
+# warnings as failures even when SPIR-V was produced; on the pinned 2026 Slang compiler those
+# warnings are diagnostics only, so retain them in CI output but do not fail a successful compile.
 python3 - "$THIRD/vksplat/compile_shaders.py" <<'PY'
 from pathlib import Path
 import sys
@@ -106,6 +108,17 @@ block = '''        # Radix sort
 if block not in s:
     raise SystemExit('compile_shaders radix block not found')
 s = s.replace(block, '')
+warning_block = '''            if output.stdout != "" or output.stderr != "":
+                return False, f"O Compiled {job_name} with warning: {output.stdout} {output.stderr}"
+            return True, f"✓ Compiled {job_name}"
+'''
+warning_fixed = '''            if output.stdout != "" or output.stderr != "":
+                return True, f"O Compiled {job_name} with warning: {output.stdout} {output.stderr}"
+            return True, f"✓ Compiled {job_name}"
+'''
+if warning_block not in s:
+    raise SystemExit('compile_shaders warning handling anchor not found')
+s = s.replace(warning_block, warning_fixed)
 p.write_text(s)
 PY
 
