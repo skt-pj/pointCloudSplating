@@ -11,6 +11,21 @@ public final class PointCloudApp extends Application {
     public void onCreate() {
         super.onCreate();
         appContext = getApplicationContext();
+        DiagnosticLog.initialize(appContext);
+
+        Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            try {
+                DiagnosticLog.e(
+                        "UncaughtException",
+                        "thread=" + (thread == null ? "unknown" : thread.getName()),
+                        throwable);
+            } catch (Throwable ignored) {
+            }
+            if (previous != null) {
+                previous.uncaughtException(thread, throwable);
+            }
+        });
     }
 
     public static Context context() {
