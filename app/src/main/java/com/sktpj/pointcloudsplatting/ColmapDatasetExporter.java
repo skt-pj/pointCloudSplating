@@ -283,15 +283,29 @@ public final class ColmapDatasetExporter {
     }
 
     private static void resizeJpeg(File source, File target, int width, int height) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(source.getAbsolutePath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new IOException("decode bounds failed " + source.getName());
+        }
+
+        int sample = 1;
+        while (bounds.outWidth / (sample * 2) >= width
+                && bounds.outHeight / (sample * 2) >= height) {
+            sample *= 2;
+        }
+
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inPreferredConfig = Bitmap.Config.ARGB_8888;
         options.inScaled = false;
-        Bitmap full = BitmapFactory.decodeFile(source.getAbsolutePath(), options);
-        if (full == null) throw new IOException("decode failed " + source.getName());
-        Bitmap scaled = full;
+        options.inSampleSize = Math.max(1, sample);
+        Bitmap decoded = BitmapFactory.decodeFile(source.getAbsolutePath(), options);
+        if (decoded == null) throw new IOException("decode failed " + source.getName());
+        Bitmap scaled = decoded;
         try {
-            if (full.getWidth() != width || full.getHeight() != height) {
-                scaled = Bitmap.createScaledBitmap(full, width, height, true);
+            if (decoded.getWidth() != width || decoded.getHeight() != height) {
+                scaled = Bitmap.createScaledBitmap(decoded, width, height, true);
             }
             try (FileOutputStream output = new FileOutputStream(target)) {
                 if (!scaled.compress(Bitmap.CompressFormat.JPEG, 95, output)) {
@@ -299,9 +313,12 @@ public final class ColmapDatasetExporter {
                 }
             }
         } finally {
-            if (scaled != full) scaled.recycle();
-            full.recycle();
+            if (scaled != decoded) scaled.recycle();
+            decoded.recycle();
         }
+        DiagnosticLog.i(TAG, "Prepared training JPEG " + source.getName()
+                + " source=" + bounds.outWidth + "x" + bounds.outHeight
+                + " sample=" + sample + " output=" + width + "x" + height);
     }
 
     private static double[][] parseMatrix(JSONArray rows) throws Exception {

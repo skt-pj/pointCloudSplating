@@ -279,7 +279,9 @@ public final class ScannerActivity extends Activity
         uiHandler = new Handler(Looper.getMainLooper());
 
         surfaceView = new GLSurfaceView(this);
-        surfaceView.setPreserveEGLContextOnPause(true);
+        // Do not retain the camera GL context while another Activity is doing Vulkan 3DGS.
+        // Releasing it on pause returns camera/point-cloud GPU allocations before training.
+        surfaceView.setPreserveEGLContextOnPause(false);
         surfaceView.setEGLContextClientVersion(2);
         surfaceView.setEGLConfigChooser(8, 8, 8, 0, 16, 0);
         surfaceView.setRenderer(this);
