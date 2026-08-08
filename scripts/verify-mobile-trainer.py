@@ -13,6 +13,7 @@ NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
 JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
 VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
+VENDORED_CUMSUM = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/slang/cumsum.slang"
 
 
 def require(text: str, needle: str, reason: str) -> None:
@@ -30,34 +31,33 @@ def ceil_div(n: int, d: int) -> int:
 
 
 def verify_cumsum_hierarchy() -> None:
-    # The Mali failure happened because the original N was passed while scanning the much smaller
-    # block-sum buffer. Model the cardinality of each recursive level for representative sizes.
-    sizes = [1, 16, 17, 1024, 1025, 59_218, 1_048_576]
-    blocks = [128, 256, 512, 1024]
-    assert ceil_div(59_218, 1024) == 58
-    for block in blocks:
-        for n in sizes:
-            if n <= 1024:
-                continue
-            level1_alloc = ceil_div(n, block)
-            if n <= block * block:
-                # scan_block_sums must see level1_alloc, never n.
-                scan_uniform = level1_alloc
-                assert scan_uniform <= level1_alloc
-                assert scan_uniform != n or n == level1_alloc
-                continue
-            if n <= block * block * block:
-                level2_alloc = ceil_div(level1_alloc, block)
-                # block_scan at level 1 sees level1_alloc elements; scan_block_sums at level 2 sees
-                # only level2_alloc; add_block_offsets at level 1 returns to level1_alloc.
-                level1_scan_uniform = level1_alloc
-                level2_scan_uniform = level2_alloc
-                level1_offset_uniform = level1_alloc
-                assert level1_scan_uniform <= level1_alloc
-                assert level2_scan_uniform <= level2_alloc
-                assert level1_offset_uniform <= level1_alloc
-                assert level1_scan_uniform != n
-                assert level2_scan_uniform != n
+    # VkSplat's block scan reduces one partial sum per subgroup using one subgroup-level prefix scan.
+    # Therefore a block may contain at most subgroup_size^2 threads. For Mali subgroup 16 this is
+    # 256 threads, not VkSplat desktop's 1024-thread block (which would create 64 partial sums).
+    subgroup = 16
+    block = subgroup * subgroup
+    assert block == 256
+    assert block // subgroup == subgroup
+
+    sizes = [1, 16, 17, 256, 257, 1024, 1025, 59_218, 87_777, 1_048_576]
+    for n in sizes:
+        if n <= 1024:
+            continue
+        level1_alloc = ceil_div(n, block)
+        if n <= block * block:
+            scan_uniform = level1_alloc
+            assert scan_uniform <= block
+            assert scan_uniform <= level1_alloc
+            continue
+        if n <= block * block * block:
+            level2_alloc = ceil_div(level1_alloc, block)
+            level1_scan_uniform = level1_alloc
+            level2_scan_uniform = level2_alloc
+            level1_offset_uniform = level1_alloc
+            assert level2_scan_uniform <= block
+            assert level1_scan_uniform <= level1_alloc
+            assert level2_scan_uniform <= level2_alloc
+            assert level1_offset_uniform <= level1_alloc
 
 
 def main() -> None:
@@ -85,6 +85,14 @@ def main() -> None:
     if not m or int(m.group(1).replace("_", "")) > 1000:
         raise SystemExit("mobile trainer architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
 
+    require(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
+            "renderer cumsum block must be subgroup squared")
+    forbid(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
+           "renderer cumsum block must not use subgroup cubed")
+    require(patch, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
+            "shader cumsum block must be subgroup squared")
+    require(patch, "if (laneId >= offset) {",
+            "subgroup scan must not read a negative predecessor lane")
     require(patch, "num_blocks", "two-level cumsum must use reduced block count")
     require(patch, "level1_uniforms", "three-level cumsum level 1 must use reduced count")
     require(patch, "level2_uniforms", "three-level cumsum level 2 must use reduced count")
@@ -92,9 +100,22 @@ def main() -> None:
 
     if VENDORED_RENDERER.is_file():
         renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
+        require(renderer, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
+                "prepared renderer still uses invalid subgroup-16 block geometry")
+        forbid(renderer, "deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
+               "prepared renderer still uses subgroup cubed")
         require(renderer, "block_uniforms", "prepared VkSplat backend is missing cumsum fix")
         require(renderer, "level1_uniforms", "prepared VkSplat backend is missing level-1 bounds")
         require(renderer, "level2_uniforms", "prepared VkSplat backend is missing level-2 bounds")
+
+    if VENDORED_CUMSUM.is_file():
+        cumsum = VENDORED_CUMSUM.read_text(encoding="utf-8")
+        require(cumsum, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
+                "prepared cumsum shader does not bound block to one subgroup of subgroup sums")
+        forbid(cumsum, "SUBGROUP_SIZE*SUBGROUP_SIZE*SUBGROUP_SIZE)",
+               "prepared cumsum shader still uses desktop subgroup-cubed geometry")
+        require(cumsum, "if (laneId >= offset) {",
+                "prepared subgroup scan may read an invalid predecessor lane")
 
     print("PCS mobile trainer architecture checks passed")
 
