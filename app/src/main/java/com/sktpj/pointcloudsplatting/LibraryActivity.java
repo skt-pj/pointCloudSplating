@@ -68,23 +68,22 @@ public final class LibraryActivity extends Activity {
         ImageView thumbnail=new ImageView(this);thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);thumbnail.setBackgroundColor(0xFF151515);thumbnail.setContentDescription("保存したスキャンの写真");Bitmap bitmap=decodeThumbnail(findFirstJpeg(dataset),480,360);if(bitmap!=null)thumbnail.setImageBitmap(bitmap);card.addView(thumbnail,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(CARD_THUMBNAIL_HEIGHT_DP)));
         TextView name=new TextView(this);name.setText(formatDatasetName(dataset.getName()));name.setTextColor(0xFFFFFFFF);name.setTextSize(15f);name.setMaxLines(1);name.setPadding(dp(4),dp(8),dp(4),0);card.addView(name);
         TextView status=new TextView(this);status.setText(buildDatasetStatus(dataset));status.setTextColor(0xFFDDDDDD);status.setTextSize(14f);status.setPadding(dp(4),dp(4),dp(4),dp(4));card.addView(status);
-        card.setContentDescription(formatDatasetName(dataset.getName())+"。"+buildDatasetStatus(dataset).replace('\n',' ')+"。タップして開く、または3Dプレビューを準備する。");card.setClickable(true);card.setFocusable(true);card.setOnClickListener(v->openOrPrepare(dataset,status));return card;
+        card.setContentDescription(formatDatasetName(dataset.getName())+"。"+buildDatasetStatus(dataset).replace('\n',' ')+"。タップして3Dモデルを開く、または作成する。");card.setClickable(true);card.setFocusable(true);card.setOnClickListener(v->openOrTrain(dataset,status));return card;
     }
 
-    private void openOrPrepare(File dataset,TextView status){
-        migrateLegacyArtifacts(dataset);if(isViewableGaussian(dataset)){openViewer(dataset);return;}
-        if(generationInProgress){Toast.makeText(this,"3Dプレビューを準備しています。少しお待ちください。",Toast.LENGTH_SHORT).show();return;}
-        generationInProgress=true;status.setText("3Dプレビューを準備中\n撮影データを確認しています…");
-        new Thread(()->{GaussianSplatJob.Result result=GaussianSplatJob.prepare(dataset,(percent,message)->runOnUiThread(()->status.setText("3Dプレビューを準備中 "+percent+"%\n"+message)));runOnUiThread(()->{generationInProgress=false;status.setText(buildDatasetStatus(dataset));if(result.success||result.hqReady)openViewer(dataset);else{status.setText("準備できませんでした\nタップしてもう一度試す");Toast.makeText(this,"3Dプレビューを準備できませんでした。撮影データは残っています。",Toast.LENGTH_LONG).show();}});},"LibraryPreparePreview").start();
+    private void openOrTrain(File dataset,TextView status){
+        migrateLegacyArtifacts(dataset);if(isPhotometricComplete(dataset)){openViewer(dataset);return;}
+        if(generationInProgress){Toast.makeText(this,"3Dモデルを学習しています。このままお待ちください。",Toast.LENGTH_SHORT).show();return;}
+        generationInProgress=true;status.setText("3Dモデルを学習中\n写真とカメラ位置を確認しています…");
+        new Thread(()->{GaussianSplatJob.Result result=GaussianSplatJob.prepare(dataset,(percent,message)->runOnUiThread(()->status.setText("3Dモデルを学習中 "+percent+"%\n"+message)));runOnUiThread(()->{generationInProgress=false;status.setText(buildDatasetStatus(dataset));if(result.success)openViewer(dataset);else{status.setText("作成できませんでした\nタップしてもう一度試す");Toast.makeText(this,"3Dモデルを作成できませんでした。撮影データは残っています。",Toast.LENGTH_LONG).show();}});},"LibraryTrainFull3DGS").start();
     }
 
-    private void openViewer(File dataset){if(!isViewableGaussian(dataset)){Toast.makeText(this,"表示できる3Dデータがまだありません。",Toast.LENGTH_LONG).show();return;}Intent intent=new Intent(this,GaussianViewerActivity.class);intent.putExtra(GaussianViewerActivity.EXTRA_DATASET_PATH,dataset.getAbsolutePath());startActivity(intent);}
+    private void openViewer(File dataset){if(!isPhotometricComplete(dataset)){Toast.makeText(this,"3DGS学習が完了したモデルはまだありません。",Toast.LENGTH_LONG).show();return;}Intent intent=new Intent(this,GaussianViewerActivity.class);intent.putExtra(GaussianViewerActivity.EXTRA_DATASET_PATH,dataset.getAbsolutePath());startActivity(intent);}
 
-    private String buildDatasetStatus(File dataset){int frames=readFrameCount(dataset);String photos=frames+"枚の写真";if(isPhotometricComplete(dataset))return photos+"\n高品質3Dモデル完成";if(isHqPreview(dataset))return photos+"\n3Dプレビュー作成済み";if(new File(dataset,DEPTH_PRIOR).isFile())return photos+"\nタップしてプレビュー作成を再開";return photos+"\nタップして3Dプレビューを作成";}
+    private String buildDatasetStatus(File dataset){int frames=readFrameCount(dataset);String photos=frames+"枚の写真";if(isPhotometricComplete(dataset))return photos+"\n3Dモデル完成";if(isHqPreview(dataset))return photos+"\n旧プレビューあり・タップして学習";if(new File(dataset,DEPTH_PRIOR).isFile())return photos+"\nタップして3Dモデルを作成";return photos+"\nタップして3Dモデルを作成";}
 
-    private static boolean isPhotometricComplete(File dataset){File splat=new File(dataset,FINAL_SPLAT);if(!splat.isFile())return false;JSONObject result=readResult(dataset);return result!=null&&result.optBoolean("photometric_optimization",false)&&result.optBoolean("rasterized_image_loss",false)&&result.optBoolean("l1_ssim_backward",false)&&result.optBoolean("final_3dgs",false)&&"COMPLETE".equals(result.optString("status",""));}
+    private static boolean isPhotometricComplete(File dataset){File splat=new File(dataset,FINAL_SPLAT);if(!splat.isFile())return false;JSONObject result=readResult(dataset);return result!=null&&result.optBoolean("photometric_optimization",false)&&result.optBoolean("rasterized_image_loss",false)&&result.optBoolean("l1_ssim_backward",false)&&result.optBoolean("density_control",false)&&result.optBoolean("final_3dgs",false)&&"COMPLETE".equals(result.optString("status",""));}
     private static boolean isHqPreview(File dataset){File preview=new File(dataset,PREVIEW_SPLAT);if(!preview.isFile())return false;JSONObject result=readResult(dataset);return result!=null&&"HQ_RGB_REFINED".equals(result.optString("status",""))&&result.optBoolean("appearance_refinement",false)&&!result.optBoolean("final_3dgs",false);}
-    private static boolean isViewableGaussian(File dataset){return isPhotometricComplete(dataset)||isHqPreview(dataset);}
 
     private static void migrateLegacyArtifacts(File dataset){
         File finalSplat=new File(dataset,FINAL_SPLAT);if(!finalSplat.isFile())return;JSONObject result=readResult(dataset);if(result==null)return;
