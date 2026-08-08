@@ -11,12 +11,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
-/** JNI bridge for the actual Vulkan differentiable 3D Gaussian Splatting trainer. */
+/** JNI bridge for the PCS mobile-first Vulkan differentiable 3D Gaussian Splatting trainer. */
 public final class NativeGaussianTrainer {
     private static final String TAG = "Native3DGS";
     private static final String ASSET_ROOT = "vksplat_shader";
     private static final String SHADER_CACHE = "vksplat_shader_41cff93b";
-    private static final int DEFAULT_TRAIN_STEPS = 6_000;
+
+    // PocketGS demonstrates that the mobile operating regime is hundreds, not tens of thousands,
+    // of iterations. Surface-aware initialization and bounded density control are designed around it.
+    private static final int BASE_TRAIN_STEPS = 750;
+    private static final int MAX_TRAIN_STEPS = 1_000;
 
     private static final boolean NATIVE_AVAILABLE;
     static {
@@ -43,21 +47,23 @@ public final class NativeGaussianTrainer {
         public final int gaussianCount;
         public final int steps;
         public final double validationPsnr;
+        public final double peakVramMb;
         public final String device;
 
         private Result(boolean success, String message, File outputFile, int gaussianCount,
-                int steps, double validationPsnr, String device) {
+                int steps, double validationPsnr, double peakVramMb, String device) {
             this.success = success;
             this.message = message;
             this.outputFile = outputFile;
             this.gaussianCount = gaussianCount;
             this.steps = steps;
             this.validationPsnr = validationPsnr;
+            this.peakVramMb = peakVramMb;
             this.device = device;
         }
 
         static Result fail(String message) {
-            return new Result(false, message, null, 0, 0, Double.NaN, "");
+            return new Result(false, message, null, 0, 0, Double.NaN, Double.NaN, "");
         }
     }
 
@@ -68,7 +74,7 @@ public final class NativeGaussianTrainer {
         }
 
         try {
-            notifyProgress(listener, 1, "写真とカメラ位置を学習用に準備しています…");
+            notifyProgress(listener, 1, "写真・カメラ位置・Depthを学習用に準備しています…");
             ColmapDatasetExporter.Result prepared = ColmapDatasetExporter.prepare(
                     dataset,
                     (percent, message) -> notifyProgress(listener,
@@ -78,8 +84,8 @@ public final class NativeGaussianTrainer {
             File shaderDir = ensureShaderFiles(context);
             File output = new File(dataset, "splat.ply");
             File working = prepared.root;
-            int steps = trainingSteps(prepared.frameCount, prepared.initialPointCount);
-            notifyProgress(listener, 16, "写真と3Dの形を比較して学習を始めます…");
+            int steps = trainingSteps(prepared.frameCount);
+            notifyProgress(listener, 16, "表面形状を初期化して端末向け3DGSを始めます…");
 
             String raw = nativeTrain(
                     working.getAbsolutePath(),
@@ -95,59 +101,76 @@ public final class NativeGaussianTrainer {
             boolean success = json.optBoolean("success", false);
             String message = json.optString("message", success ? "3DGS学習完了" : "3DGS学習に失敗しました");
             if (!success || !output.isFile() || output.length() == 0L) {
-                DiagnosticLog.w(TAG, "Native training failed result=" + raw);
+                DiagnosticLog.w(TAG, "Mobile training failed result=" + raw);
                 return Result.fail(message);
             }
 
             int gaussians = json.optInt("gaussian_count", 0);
             int completedSteps = json.optInt("steps", steps);
             double psnr = json.optDouble("validation_psnr", Double.NaN);
+            double peakVramMb = json.optDouble("peak_vram_mb", Double.NaN);
             String device = json.optString("device", "Vulkan");
-            writeFinalResult(dataset, gaussians, completedSteps, psnr, device, prepared);
-            DiagnosticLog.i(TAG, "Full 3DGS COMPLETE gaussians=" + gaussians
-                    + " steps=" + completedSteps + " validationPsnr=" + psnr
+            int gaussianBudget = json.optInt("gaussian_budget", 120_000);
+            String strategy = json.optString("strategy", "bounded_mcmc");
+            String initialization = json.optString("initialization", "surface_knn_16_3");
+
+            writeFinalResult(dataset, gaussians, completedSteps, psnr, peakVramMb,
+                    device, gaussianBudget, strategy, initialization, prepared);
+            DiagnosticLog.i(TAG, "Mobile 3DGS COMPLETE gaussians=" + gaussians
+                    + "/" + gaussianBudget + " steps=" + completedSteps
+                    + " validationPsnr=" + psnr + " peakVramMb=" + peakVramMb
+                    + " strategy=" + strategy + " init=" + initialization
                     + " device=" + device + " output=" + output.getAbsolutePath());
             notifyProgress(listener, 100, "3Dモデルを作成しました");
             return new Result(true, "3DGS学習完了", output, gaussians,
-                    completedSteps, psnr, device);
+                    completedSteps, psnr, peakVramMb, device);
         } catch (Throwable error) {
-            DiagnosticLog.e(TAG, "Native 3DGS training failed", error);
+            DiagnosticLog.e(TAG, "Mobile 3DGS training failed", error);
             return Result.fail("端末内3DGS学習に失敗しました: " + error.getClass().getSimpleName());
         }
     }
 
-    private static int trainingSteps(int frames, int points) {
-        // Keep the full differentiable optimization long enough to reach SH3 and run multiple
-        // densification/pruning cycles, while avoiding an unbounded thermal workload on a phone.
-        int base = DEFAULT_TRAIN_STEPS;
-        if (frames >= 24) base += 1_500;
-        if (points >= 120_000) base += 1_000;
-        return Math.min(9_000, base);
+    private static int trainingSteps(int frames) {
+        // Keep runtime inside a mobile-scale optimization regime. More observations can justify a
+        // modest increase, but point count no longer drives a desktop-style densification schedule.
+        int steps = BASE_TRAIN_STEPS;
+        if (frames >= 12) steps += 125;
+        if (frames >= 24) steps += 125;
+        return Math.min(MAX_TRAIN_STEPS, steps);
     }
 
     private static void writeFinalResult(File dataset, int gaussians, int steps, double psnr,
-            String device, ColmapDatasetExporter.Result prepared) throws Exception {
+            double peakVramMb, String device, int gaussianBudget, String strategy,
+            String initialization, ColmapDatasetExporter.Result prepared) throws Exception {
         JSONObject result = new JSONObject();
-        result.put("format_version", 6);
+        result.put("format_version", 7);
         result.put("status", "COMPLETE");
-        result.put("backend", "android_vksplat_vulkan_compute");
-        result.put("source_backend", "VkSplat@41cff93b79145dec314488d4313bc3a6d737038b");
+        result.put("backend", "pcs_mobile_vulkan_trainer_v1");
+        result.put("raster_backend", "VkSplat@41cff93b79145dec314488d4313bc3a6d737038b");
         result.put("output", "splat.ply");
         result.put("frame_count", prepared.frameCount);
-        result.put("initial_point_count", prepared.initialPointCount);
+        result.put("raw_initial_point_count", prepared.initialPointCount);
         result.put("gaussian_count", gaussians);
+        result.put("gaussian_budget", gaussianBudget);
         result.put("training_steps", steps);
         result.put("training_resolution_scale", 0.25);
         result.put("loss", "L1 + SSIM");
         result.put("optimized_parameters", "position, quaternion, scale, opacity, SH0-SH3");
+        result.put("initialization", initialization);
+        result.put("normal_neighbors", 16);
+        result.put("scale_neighbors", 3);
         result.put("density_control", true);
-        result.put("densification_pruning", true);
+        result.put("density_strategy", strategy);
+        result.put("densification_pruning", false);
+        result.put("bounded_gaussian_budget", true);
+        result.put("projection_invariant_checks", true);
         result.put("rasterized_image_loss", true);
         result.put("l1_ssim_backward", true);
         result.put("photometric_optimization", true);
         result.put("final_3dgs", true);
         result.put("vulkan_device", device);
         if (Double.isFinite(psnr)) result.put("validation_psnr", psnr);
+        if (Double.isFinite(peakVramMb)) result.put("peak_vram_mb", peakVramMb);
         result.put("completed_at_unix_ms", System.currentTimeMillis());
         try (FileOutputStream out = new FileOutputStream(new File(dataset, "3dgs_result.json"))) {
             out.write(result.toString(2).getBytes(StandardCharsets.UTF_8));
@@ -155,15 +178,19 @@ public final class NativeGaussianTrainer {
 
         File jobFile = new File(dataset, "3dgs_job.json");
         JSONObject job = new JSONObject();
-        job.put("format_version", 7);
+        job.put("format_version", 8);
         job.put("status", "COMPLETE");
-        job.put("backend", "android_vksplat_vulkan_compute");
+        job.put("backend", "pcs_mobile_vulkan_trainer_v1");
+        job.put("raster_backend", "VkSplat@41cff93b79145dec314488d4313bc3a6d737038b");
         job.put("final_output", "splat.ply");
         job.put("final_3dgs", true);
         job.put("photometric_optimization", true);
         job.put("rasterized_image_loss", true);
         job.put("l1_ssim_backward", true);
         job.put("density_control", true);
+        job.put("density_strategy", strategy);
+        job.put("gaussian_budget", gaussianBudget);
+        job.put("initialization", initialization);
         try (FileOutputStream out = new FileOutputStream(jobFile)) {
             out.write(job.toString(2).getBytes(StandardCharsets.UTF_8));
         }
