@@ -46,14 +46,14 @@ public final class GaussianViewerActivity extends Activity {
         super.onCreate(savedInstanceState);
         String datasetPath = getIntent().getStringExtra(EXTRA_DATASET_PATH);
         if (datasetPath == null) {
-            Toast.makeText(this, "dataset pathがありません", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "3Dモデルを開けませんでした。", Toast.LENGTH_LONG).show();
             finish();
             return;
         }
         File dataset = new File(datasetPath);
         File splat = new File(dataset, "splat.ply");
         if (!splat.isFile()) {
-            Toast.makeText(this, "splat.plyがありません", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "3Dモデルを開けませんでした。", Toast.LENGTH_LONG).show();
             finish();
             return;
         }
@@ -74,6 +74,7 @@ public final class GaussianViewerActivity extends Activity {
                     }
                 });
         glView.setOnTouchListener(this::handleTouch);
+        glView.setContentDescription("3Dモデル表示。指一本で回転、二本指で拡大縮小できます");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF101010);
@@ -82,13 +83,14 @@ public final class GaussianViewerActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         LinearOverlay overlay = new LinearOverlay(this);
-        overlay.button("戻る", v -> finish());
+        overlay.button("戻る", "保存したスキャンに戻る", v -> finish());
         statusView = overlay.status();
-        statusView.setText("Gaussianを読み込んでいます...\nドラッグ: 回転 / ピンチ: ズーム");
-        overlay.button("リセット", v -> renderer.resetCamera());
+        statusView.setText("3Dモデルを読み込んでいます…\nドラッグで回転 / ピンチで拡大・縮小");
+        overlay.button("正面に戻す", "3Dモデルの向きと大きさを元に戻す",
+                v -> renderer.resetCamera());
 
         FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, dp(60));
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(64));
         topParams.gravity = Gravity.TOP;
         topParams.leftMargin = dp(6);
         topParams.rightMargin = dp(6);
@@ -96,11 +98,11 @@ public final class GaussianViewerActivity extends Activity {
         root.addView(overlay.root, topParams);
 
         TextView title = new TextView(this);
-        title.setText(dataset.getName());
+        title.setText("3Dモデル");
         title.setTextColor(0xFFFFFFFF);
         title.setTextSize(14f);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
-        title.setBackgroundColor(0x55000000);
+        title.setBackgroundColor(0x66000000);
         FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, dp(32));
         titleParams.gravity = Gravity.BOTTOM;
@@ -132,14 +134,14 @@ public final class GaussianViewerActivity extends Activity {
                 ModelData model = GaussianPlyReader.read(splat);
                 renderer.setModel(model);
                 runOnUiThread(() -> statusView.setText(
-                        String.format(Locale.US,
-                                "%,d Gaussians / auto-fit\nドラッグ: 回転 / ピンチ: ズーム",
-                                model.count)));
+                        "3Dモデルを表示中\nドラッグで回転 / ピンチで拡大・縮小"));
             } catch (Exception e) {
                 DiagnosticLog.e("GaussianViewer", "Failed to load splat.ply", e);
                 runOnUiThread(() -> {
-                    statusView.setText("Gaussian読込失敗: " + e.getMessage());
-                    Toast.makeText(this, "Gaussianを表示できません", Toast.LENGTH_LONG).show();
+                    statusView.setText("3Dモデルを表示できませんでした");
+                    Toast.makeText(this,
+                            "3Dモデルを表示できませんでした。",
+                            Toast.LENGTH_LONG).show();
                 });
             }
         }, "LoadGaussianPly").start();
@@ -182,14 +184,17 @@ public final class GaussianViewerActivity extends Activity {
             root = new android.widget.LinearLayout(activity);
             root.setOrientation(android.widget.LinearLayout.HORIZONTAL);
             root.setGravity(Gravity.CENTER_VERTICAL);
-            root.setBackgroundColor(0x66000000);
+            root.setBackgroundColor(0x77000000);
         }
 
-        Button button(String text, View.OnClickListener listener) {
+        Button button(String text, String contentDescription, View.OnClickListener listener) {
             Button button = new Button(activity);
             button.setText(text);
+            button.setAllCaps(false);
+            button.setContentDescription(contentDescription);
+            button.setMinHeight(Math.round(48 * activity.getResources().getDisplayMetrics().density));
             button.setOnClickListener(listener);
-            int widthDp = activity.getResources().getDisplayMetrics().densityDpi >= 320 ? 108 : 92;
+            int widthDp = "正面に戻す".equals(text) ? 128 : 86;
             root.addView(button, new android.widget.LinearLayout.LayoutParams(
                     Math.round(widthDp * activity.getResources().getDisplayMetrics().density),
                     android.widget.LinearLayout.LayoutParams.MATCH_PARENT));
