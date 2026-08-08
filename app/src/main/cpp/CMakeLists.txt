@@ -33,9 +33,11 @@ target_include_directories(pointcloud3dgs PRIVATE
     ${GLM_ROOT}
 )
 
+# Pixel 10a uses Arm Mali-G715 (Valhall), whose execution architecture is 16-wide.
+# Keep native code and all packaged VkSplat SPIR-V on the same subgroup width.
 target_compile_definitions(pointcloud3dgs PRIVATE
     VK_USE_PLATFORM_ANDROID_KHR=1
-    SUBGROUP_SIZE=32
+    SUBGROUP_SIZE=16
 )
 
 target_compile_options(pointcloud3dgs PRIVATE
