@@ -78,6 +78,7 @@ public final class DatasetCaptureManager {
     private Pose lastRequestedPose;
     private long lastRequestedTimestampNs = -1L;
     private boolean captureInFlight;
+    private boolean cameraActive = true;
     private volatile boolean captureEnabled = true;
     private volatile int savedCount;
     private volatile String lastDecision = "waiting for first stable view";
@@ -146,8 +147,45 @@ public final class DatasetCaptureManager {
         return lastDecision;
     }
 
+    public synchronized void onCameraResumed() {
+        cameraActive = true;
+        captureInFlight = false;
+        previousPose = null;
+        previousFrameTimestampNs = -1L;
+        lastRequestedPose = null;
+        lastRequestedTimestampNs = -1L;
+        poseSamples.clear();
+        depthSamples.clear();
+        pendingJpegs.clear();
+        stillMetadata.clear();
+        if (captureEnabled) {
+            lastDecision = "camera resumed";
+        }
+        DiagnosticLog.i(TAG, "Camera synchronization state reset on resume");
+    }
+
+    public synchronized void onCameraPaused() {
+        int discardedPending = pendingJpegs.size();
+        cameraActive = false;
+        captureInFlight = false;
+        pendingJpegs.clear();
+        stillMetadata.clear();
+        poseSamples.clear();
+        depthSamples.clear();
+        previousPose = null;
+        previousFrameTimestampNs = -1L;
+        lastRequestedPose = null;
+        lastRequestedTimestampNs = -1L;
+        lastDecision = captureEnabled ? "camera paused" : "capture stopped; finalizing";
+        DiagnosticLog.i(TAG,
+                "Camera synchronization state reset on pause pending=" + discardedPending);
+    }
+
     /** Called on the AR/GL thread for each newly-created DepthData frame. */
     public synchronized void onDepthFrame(DepthData depth, Pose rootPose) {
+        if (!cameraActive) {
+            return;
+        }
         try {
             WorldPointCloudSnapshot snapshot = WorldPointCloudSnapshot.from(depth, rootPose);
             depthSamples.addLast(snapshot);
@@ -162,6 +200,10 @@ public final class DatasetCaptureManager {
 
     /** Records pose continuously and returns true when a useful, reasonably stable photo is due. */
     public synchronized boolean onArFrame(Frame frame, Camera camera, Pose rootPose) {
+        if (!cameraActive) {
+            lastDecision = "camera paused";
+            return false;
+        }
         long timestampNs = frame.getTimestamp();
         Pose pose = rootPose.inverse().compose(camera.getPose());
         Motion motion = measureMotion(pose, timestampNs);
@@ -226,6 +268,9 @@ public final class DatasetCaptureManager {
     }
 
     public synchronized void onCaptureCompleted(TotalCaptureResult result) {
+        if (!cameraActive) {
+            return;
+        }
         Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
         if (timestamp == null) {
             captureInFlight = false;
@@ -249,6 +294,9 @@ public final class DatasetCaptureManager {
             buffer.get(jpeg);
             long timestamp = image.getTimestamp();
             synchronized (this) {
+                if (!cameraActive) {
+                    return;
+                }
                 pendingJpegs.put(timestamp, new PendingJpeg(timestamp, jpeg));
                 captureInFlight = false;
                 tryFinalizePendingLocked();
