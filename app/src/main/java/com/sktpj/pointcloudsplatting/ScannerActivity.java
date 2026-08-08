@@ -150,7 +150,6 @@ public final class ScannerActivity extends Activity
     private volatile CaptureEnvironment captureEnvironment = CaptureEnvironment.INDOOR;
     private Anchor datasetRootAnchor;
 
-    // Latest repeating Camera2 result. This is converted to a short manual exposure for each still.
     private volatile Long latestExposureTimeNs;
     private volatile Integer latestIso;
     private volatile Float latestFocusDistanceDiopters;
@@ -192,9 +191,7 @@ public final class ScannerActivity extends Activity
                 @Override
                 public void onClosed(CameraDevice device) {
                     DiagnosticLog.i(TAG, "Shared camera closed id=" + device.getId());
-                    if (cameraDevice == device) {
-                        cameraDevice = null;
-                    }
+                    if (cameraDevice == device) cameraDevice = null;
                     cameraOpening = false;
                 }
             };
@@ -220,9 +217,7 @@ public final class ScannerActivity extends Activity
                 @Override
                 public void onActive(CameraCaptureSession activeSession) {
                     DiagnosticLog.i(TAG, "Camera capture session active");
-                    if (activityResumed && !arcoreActive) {
-                        resumeArCore();
-                    }
+                    if (activityResumed && !arcoreActive) resumeArCore();
                 }
 
                 @Override
@@ -240,9 +235,7 @@ public final class ScannerActivity extends Activity
                 @Override
                 public void onClosed(CameraCaptureSession closedSession) {
                     DiagnosticLog.i(TAG, "Camera capture session closed");
-                    if (captureSession == closedSession) {
-                        captureSession = null;
-                    }
+                    if (captureSession == closedSession) captureSession = null;
                 }
             };
 
@@ -419,9 +412,9 @@ public final class ScannerActivity extends Activity
         actionBar.addView(saveButton, saveParams);
 
         gaussianButton = new Button(this);
-        gaussianButton.setText("3Dモデルを作成");
+        gaussianButton.setText("3Dプレビューを作成");
         styleButton(gaussianButton, 0xFF0B57D0, 15f);
-        gaussianButton.setContentDescription("撮影した写真から3Dモデルを作成する");
+        gaussianButton.setContentDescription("撮影した写真から3Dプレビューを作成する");
         gaussianButton.setOnClickListener(v -> startGaussianSplatting());
         LinearLayout.LayoutParams modelParams = new LinearLayout.LayoutParams(0, dp(56), 0.58f);
         modelParams.leftMargin = dp(6);
@@ -526,9 +519,7 @@ public final class ScannerActivity extends Activity
     }
 
     private String getCurrentDatasetPath() {
-        if (finalizedDatasetPath != null) {
-            return finalizedDatasetPath;
-        }
+        if (finalizedDatasetPath != null) return finalizedDatasetPath;
         return datasetCaptureManager == null
                 ? "dataset unavailable"
                 : datasetCaptureManager.getCaptureDirectoryPath();
@@ -590,7 +581,7 @@ public final class ScannerActivity extends Activity
                     modeButton.setEnabled(false);
                     captureCountView.setText("保存した写真 " + result.frameCount + "枚");
                     showState("撮影を保存しました",
-                            result.frameCount + "枚の写真を保存しました。3Dモデルを作成できます。");
+                            result.frameCount + "枚の写真を保存しました。3Dプレビューを作成できます。");
                     if (runGaussianAfterSave) {
                         runGaussianAfterSave = false;
                         startGaussianSplatting();
@@ -614,7 +605,7 @@ public final class ScannerActivity extends Activity
             return;
         }
         if (processingModel) {
-            showFeedback("3Dモデルを作成しています。このままお待ちください");
+            showFeedback("3Dプレビューを準備しています。このままお待ちください");
             return;
         }
 
@@ -628,7 +619,7 @@ public final class ScannerActivity extends Activity
                 return;
             }
             runGaussianAfterSave = true;
-            showOperation("3Dモデルを作成します", "最後の写真を保存しています…", -1);
+            showOperation("3Dプレビューを準備します", "最後の写真を保存しています…", -1);
             saveCurrentDataset();
             return;
         }
@@ -637,31 +628,35 @@ public final class ScannerActivity extends Activity
         gaussianButton.setEnabled(false);
         saveButton.setEnabled(false);
         modeButton.setEnabled(false);
-        showOperation("3Dモデルを作成中", "撮影データを確認しています…", 0);
+        showOperation("3Dプレビューを準備中", "撮影データを確認しています…", 0);
         File datasetDirectory = new File(finalizedDatasetPath);
         new Thread(() -> {
             GaussianSplatJob.Result result = GaussianSplatJob.prepare(
                     datasetDirectory,
                     (percent, message) -> runOnUiThread(() ->
-                            showOperation("3Dモデルを作成中", message, percent)));
+                            showOperation("3Dプレビューを準備中", message, percent)));
             runOnUiThread(() -> {
                 processingModel = false;
                 gaussianButton.setEnabled(true);
-                if (result.success || result.hqReady) {
-                    showOperation("3Dモデルを作成しました",
-                            "完成したモデルを表示します。", 100);
+                if (result.success) {
+                    showOperation("高品質3Dモデルを作成しました",
+                            "完成した3Dモデルを表示します。", 100);
+                    openViewer(datasetDirectory);
+                } else if (result.hqReady) {
+                    showOperation("3Dプレビューを準備しました",
+                            "撮影した高画質写真を反映したプレビューを表示します。", 100);
                     openViewer(datasetDirectory);
                 } else if (result.priorReady) {
-                    showState("3Dモデルを仕上げられませんでした",
-                            "撮影データは保存されています。「3Dモデルを作成」をもう一度押してください。");
-                    showFeedback("撮影データは失われていません。もう一度作成できます");
+                    showState("3Dプレビューを仕上げられませんでした",
+                            "撮影データは保存されています。「3Dプレビューを作成」をもう一度押してください。");
+                    showFeedback("撮影データは失われていません。もう一度準備できます");
                 } else {
-                    showState("3Dモデルを作成できませんでした",
+                    showState("3Dプレビューを準備できませんでした",
                             "保存したスキャンを確認して、もう一度お試しください。直らない場合は診断情報をコピーしてください。");
-                    DiagnosticLog.w(TAG, "Model creation failed userMessage=" + result.message);
+                    DiagnosticLog.w(TAG, "3D preview preparation failed userMessage=" + result.message);
                 }
             });
-        }, "GenerateHighQualityGaussian").start();
+        }, "GenerateHighQualityGaussianPreview").start();
     }
 
     private void openViewer(File datasetDirectory) {
@@ -672,12 +667,10 @@ public final class ScannerActivity extends Activity
     }
 
     private static boolean decisionIndicatesPendingPhoto(String decision) {
-        if (decision == null) {
-            return false;
-        }
+        if (decision == null) return false;
         return decision.contains("photo capture in flight")
                 || decision.contains("requesting texture photo")
-                || decision.contains("waiting for synchronized Raw Depth");
+                || decision.contains("waiting briefly for Raw Depth prior");
     }
 
     private void copyLogsToClipboard() {
@@ -694,9 +687,7 @@ public final class ScannerActivity extends Activity
     private void copyText(String label, String text) {
         ClipboardManager clipboard =
                 (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard != null) {
-            clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
-        }
+        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
     }
 
     private String buildDiagnosticReport() {
@@ -753,9 +744,7 @@ public final class ScannerActivity extends Activity
         } catch (IOException | RuntimeException e) {
             out.append("logcat unavailable: ").append(e).append('\n');
         } finally {
-            if (process != null) {
-                process.destroy();
-            }
+            if (process != null) process.destroy();
         }
         return out.toString();
     }
@@ -770,19 +759,13 @@ public final class ScannerActivity extends Activity
             requestPermissions(new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
             return;
         }
-        if (session == null && !createSharedArSession()) {
-            return;
-        }
+        if (session == null && !createSharedArSession()) return;
 
         surfaceView.onResume();
         registerDisplayListener();
         displayGeometryChanged = true;
-        if (surfaceCreated) {
-            openCameraForSharing();
-        }
-        if (!captureFinalized && !processingModel) {
-            showState("準備中", "カメラを準備しています…");
-        }
+        if (surfaceCreated) openCameraForSharing();
+        if (!captureFinalized && !processingModel) showState("準備中", "カメラを準備しています…");
     }
 
     private boolean createSharedArSession() {
@@ -849,16 +832,13 @@ public final class ScannerActivity extends Activity
                     "Google Play 開発者サービス（AR）をインストールしてから、もう一度開いてください。");
         } catch (UnavailableApkTooOldException e) {
             DiagnosticLog.e(TAG, "ARCore APK too old", e);
-            showState("AR機能の更新が必要です",
-                    "Google Play 開発者サービス（AR）を更新してください。");
+            showState("AR機能の更新が必要です", "Google Play 開発者サービス（AR）を更新してください。");
         } catch (UnavailableSdkTooOldException e) {
             DiagnosticLog.e(TAG, "ARCore SDK too old", e);
-            showState("アプリの更新が必要です",
-                    "最新のpointCloudSplatingをインストールしてください。");
+            showState("アプリの更新が必要です", "最新のpointCloudSplatingをインストールしてください。");
         } catch (UnavailableDeviceNotCompatibleException e) {
             DiagnosticLog.e(TAG, "Device is not ARCore compatible", e);
-            showState("この端末では利用できません",
-                    "この端末は必要なAR機能に対応していません。");
+            showState("この端末では利用できません", "この端末は必要なAR機能に対応していません。");
         } catch (CameraAccessException | RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to configure SharedCamera", e);
             showState("カメラを準備できませんでした",
@@ -877,16 +857,8 @@ public final class ScannerActivity extends Activity
     }
 
     private void openCameraForSharing() {
-        if (!activityResumed
-                || !surfaceCreated
-                || session == null
-                || sharedCamera == null
-                || cameraId == null
-                || cameraHandler == null
-                || cameraDevice != null
-                || cameraOpening) {
-            return;
-        }
+        if (!activityResumed || !surfaceCreated || session == null || sharedCamera == null
+                || cameraId == null || cameraHandler == null || cameraDevice != null || cameraOpening) return;
         try {
             int textureId = cameraBackgroundRenderer.getTextureId();
             session.setCameraTextureName(textureId);
@@ -898,25 +870,19 @@ public final class ScannerActivity extends Activity
         } catch (CameraAccessException | SecurityException | IllegalArgumentException e) {
             cameraOpening = false;
             DiagnosticLog.e(TAG, "Failed to open SharedCamera", e);
-            showState("カメラを開けませんでした",
-                    "カメラの許可を確認して、アプリを開き直してください。");
+            showState("カメラを開けませんでした", "カメラの許可を確認して、アプリを開き直してください。");
         }
     }
 
     private void createCameraCaptureSession() {
-        if (cameraDevice == null || sharedCamera == null || jpegReader == null) {
-            return;
-        }
+        if (cameraDevice == null || sharedCamera == null || jpegReader == null) return;
         try {
             List<Surface> arCoreSurfaces = new ArrayList<>(sharedCamera.getArCoreSurfaces());
             List<Surface> sessionSurfaces = new ArrayList<>(arCoreSurfaces);
             sessionSurfaces.add(jpegReader.getSurface());
 
-            previewCaptureRequestBuilder =
-                    cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
-            for (Surface surface : arCoreSurfaces) {
-                previewCaptureRequestBuilder.addTarget(surface);
-            }
+            previewCaptureRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            for (Surface surface : arCoreSurfaces) previewCaptureRequestBuilder.addTarget(surface);
             previewCaptureRequestBuilder.set(
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
@@ -926,8 +892,7 @@ public final class ScannerActivity extends Activity
                             + " totalSurfaces=" + sessionSurfaces.size()
                             + " JPEG=" + jpegSize);
             CameraCaptureSession.StateCallback wrapped =
-                    sharedCamera.createARSessionStateCallback(
-                            cameraSessionStateCallback, cameraHandler);
+                    sharedCamera.createARSessionStateCallback(cameraSessionStateCallback, cameraHandler);
             cameraDevice.createCaptureSession(sessionSurfaces, wrapped, cameraHandler);
         } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
             DiagnosticLog.e(TAG, "Failed to create SharedCamera capture session", e);
@@ -937,14 +902,10 @@ public final class ScannerActivity extends Activity
     }
 
     private void resumeArCore() {
-        if (session == null || sharedCamera == null || arcoreActive || !activityResumed) {
-            return;
-        }
+        if (session == null || sharedCamera == null || arcoreActive || !activityResumed) return;
         try {
             session.resume();
-            if (datasetCaptureManager != null) {
-                datasetCaptureManager.onCameraResumed();
-            }
+            if (datasetCaptureManager != null) datasetCaptureManager.onCameraResumed();
             arcoreActive = true;
             sharedCamera.setCaptureCallback(cameraCaptureCallback, cameraHandler);
             DiagnosticLog.i(TAG, "ARCore resumed with SharedCamera");
@@ -974,30 +935,20 @@ public final class ScannerActivity extends Activity
             return;
         }
         cameraHandler.post(() -> {
-            if (!arcoreActive
-                    || cameraDevice == null
-                    || captureSession == null
-                    || jpegReader == null
-                    || sharedCamera == null
-                    || cameraCharacteristics == null) {
+            if (!arcoreActive || cameraDevice == null || captureSession == null || jpegReader == null
+                    || sharedCamera == null || cameraCharacteristics == null) {
                 failPendingPhoto("camera not ready for still");
                 return;
             }
             try {
-                CaptureRequest.Builder still =
-                        cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
-                for (Surface surface : sharedCamera.getArCoreSurfaces()) {
-                    still.addTarget(surface);
-                }
+                CaptureRequest.Builder still = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+                for (Surface surface : sharedCamera.getArCoreSurfaces()) still.addTarget(surface);
                 still.addTarget(jpegReader.getSurface());
                 still.setTag(HIGH_RES_CAPTURE_TAG);
                 still.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
-                // Keep encoded pixels in sensor/readout orientation so camera pose and intrinsics
-                // stay in one deterministic convention for reconstruction.
                 still.set(CaptureRequest.JPEG_ORIENTATION, 0);
                 still.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
-                still.set(
-                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                still.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                         CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
 
                 String rejection = applyPhotogrammetryExposureAndFocus(still);
@@ -1008,17 +959,13 @@ public final class ScannerActivity extends Activity
                 }
 
                 still.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO);
-                Boolean awbLockAvailable =
-                        cameraCharacteristics.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE);
-                if (Boolean.TRUE.equals(awbLockAvailable)) {
-                    still.set(CaptureRequest.CONTROL_AWB_LOCK, true);
-                }
+                Boolean awbLockAvailable = cameraCharacteristics.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE);
+                if (Boolean.TRUE.equals(awbLockAvailable)) still.set(CaptureRequest.CONTROL_AWB_LOCK, true);
 
                 int[] oisModes = cameraCharacteristics.get(
                         CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
                 if (contains(oisModes, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)) {
-                    still.set(
-                            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    still.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                             CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF);
                 }
 
@@ -1030,33 +977,20 @@ public final class ScannerActivity extends Activity
         });
     }
 
-    /** Returns null on success or an internal reason to skip this frame. */
     private String applyPhotogrammetryExposureAndFocus(CaptureRequest.Builder still) {
-        if (!manualSensorSupported) {
-            return "manual sensor unsupported";
-        }
+        if (!manualSensorSupported) return "manual sensor unsupported";
         Long autoExposure = latestExposureTimeNs;
         Integer autoIso = latestIso;
         Float focusDistance = latestFocusDistanceDiopters;
         Integer lensState = latestLensState;
         Integer afState = latestAfState;
-        if (autoExposure == null || autoIso == null || focusDistance == null) {
-            return "waiting for Camera2 exposure/focus metadata";
-        }
-        if (lensState != null && lensState != CaptureResult.LENS_STATE_STATIONARY) {
-            return "lens moving";
-        }
-        if (!isFocusedState(afState)) {
-            return "autofocus not converged";
-        }
+        if (autoExposure == null || autoIso == null || focusDistance == null) return "waiting for Camera2 exposure/focus metadata";
+        if (lensState != null && lensState != CaptureResult.LENS_STATE_STATIONARY) return "lens moving";
+        if (!isFocusedState(afState)) return "autofocus not converged";
 
-        Range<Long> exposureRange = cameraCharacteristics.get(
-                CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
-        Range<Integer> isoRange = cameraCharacteristics.get(
-                CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
-        if (exposureRange == null || isoRange == null) {
-            return "manual exposure range unavailable";
-        }
+        Range<Long> exposureRange = cameraCharacteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        Range<Integer> isoRange = cameraCharacteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        if (exposureRange == null || isoRange == null) return "manual exposure range unavailable";
 
         long policyMaxExposure = maxStillExposureNs();
         int policyMaxIso = maxPhotogrammetryIso();
@@ -1064,40 +998,30 @@ public final class ScannerActivity extends Activity
         long maxExposure = Math.min(exposureRange.getUpper(), policyMaxExposure);
         int minIso = isoRange.getLower();
         int maxIso = Math.min(isoRange.getUpper(), policyMaxIso);
-        if (minExposure > maxExposure || minIso > maxIso) {
-            return "invalid sensor exposure range";
-        }
+        if (minExposure > maxExposure || minIso > maxIso) return "invalid sensor exposure range";
 
         double exposureProduct = (double) autoExposure * (double) autoIso;
         long exposure = clampLong(TARGET_STILL_EXPOSURE_NS, minExposure, maxExposure);
         int iso = (int) Math.ceil(exposureProduct / exposure);
-
         if (iso < minIso) {
             iso = minIso;
             exposure = clampLong(Math.round(exposureProduct / iso), minExposure, maxExposure);
         } else if (iso > maxIso) {
             iso = maxIso;
             long requiredExposure = (long) Math.ceil(exposureProduct / iso);
-            if (requiredExposure > maxExposure) {
-                return "scene too dark for " + capturePolicySummary();
-            }
+            if (requiredExposure > maxExposure) return "scene too dark for " + capturePolicySummary();
             exposure = clampLong(requiredExposure, minExposure, maxExposure);
         }
         iso = clampInt((int) Math.round(exposureProduct / exposure), minIso, maxIso);
-        if (exposure > policyMaxExposure || iso > policyMaxIso) {
-            return "exposure quality limit exceeded for " + captureEnvironmentLabel();
-        }
+        if (exposure > policyMaxExposure || iso > policyMaxIso) return "exposure quality limit exceeded for " + captureEnvironmentLabel();
 
         still.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
         still.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure);
         still.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
 
         float lockedFocusDistance = Math.max(0f, focusDistance);
-        Float minimumFocusDistance = cameraCharacteristics.get(
-                CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
-        if (minimumFocusDistance != null) {
-            lockedFocusDistance = Math.min(lockedFocusDistance, minimumFocusDistance);
-        }
+        Float minimumFocusDistance = cameraCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        if (minimumFocusDistance != null) lockedFocusDistance = Math.min(lockedFocusDistance, minimumFocusDistance);
         still.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
         still.set(CaptureRequest.LENS_FOCUS_DISTANCE, lockedFocusDistance);
         DiagnosticLog.i(TAG,
@@ -1108,9 +1032,7 @@ public final class ScannerActivity extends Activity
     }
 
     private void failPendingPhoto(String reason) {
-        if (datasetCaptureManager != null) {
-            datasetCaptureManager.onCaptureRequestFailed(reason);
-        }
+        if (datasetCaptureManager != null) datasetCaptureManager.onCaptureRequestFailed(reason);
     }
 
     @Override
@@ -1126,19 +1048,14 @@ public final class ScannerActivity extends Activity
             }
         }
         closeCamera();
-        if (datasetCaptureManager != null) {
-            datasetCaptureManager.onCameraPaused();
-        }
+        if (datasetCaptureManager != null) datasetCaptureManager.onCameraPaused();
         super.onPause();
     }
 
     private void closeCamera() {
         if (captureSession != null) {
-            try {
-                captureSession.close();
-            } catch (RuntimeException e) {
-                DiagnosticLog.w(TAG, "Error closing capture session: " + e.getMessage());
-            }
+            try { captureSession.close(); }
+            catch (RuntimeException e) { DiagnosticLog.w(TAG, "Error closing capture session: " + e.getMessage()); }
             captureSession = null;
         }
         if (cameraDevice != null) {
@@ -1153,38 +1070,21 @@ public final class ScannerActivity extends Activity
         DiagnosticLog.i(TAG, "onDestroy");
         activityResumed = false;
         closeCamera();
-        if (jpegReader != null) {
-            jpegReader.close();
-            jpegReader = null;
-        }
-        if (datasetCaptureManager != null) {
-            datasetCaptureManager.shutdown();
-            datasetCaptureManager = null;
-        }
-        if (session != null) {
-            session.close();
-            session = null;
-        }
-        if (uiHandler != null && hideFeedbackRunnable != null) {
-            uiHandler.removeCallbacks(hideFeedbackRunnable);
-        }
+        if (jpegReader != null) { jpegReader.close(); jpegReader = null; }
+        if (datasetCaptureManager != null) { datasetCaptureManager.shutdown(); datasetCaptureManager = null; }
+        if (session != null) { session.close(); session = null; }
+        if (uiHandler != null && hideFeedbackRunnable != null) uiHandler.removeCallbacks(hideFeedbackRunnable);
         stopCameraThread();
         super.onDestroy();
     }
 
     @Override
-    public void onRequestPermissionsResult(
-            int requestCode, String[] permissions, int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != CAMERA_PERMISSION_REQUEST) {
-            return;
-        }
-        if (hasCameraPermission()) {
-            recreate();
-        } else {
-            Toast.makeText(this,
-                    "3Dスキャンにはカメラの許可が必要です。",
-                    Toast.LENGTH_LONG).show();
+        if (requestCode != CAMERA_PERMISSION_REQUEST) return;
+        if (hasCameraPermission()) recreate();
+        else {
+            Toast.makeText(this, "3Dスキャンにはカメラの許可が必要です。", Toast.LENGTH_LONG).show();
             finish();
         }
     }
@@ -1196,8 +1096,7 @@ public final class ScannerActivity extends Activity
             cameraBackgroundRenderer.createOnGlThread(this);
             pointCloudRenderer.createOnGlThread(this);
             surfaceCreated = true;
-            DiagnosticLog.i(TAG,
-                    "GL resources ready cameraTexture=" + cameraBackgroundRenderer.getTextureId());
+            DiagnosticLog.i(TAG, "GL resources ready cameraTexture=" + cameraBackgroundRenderer.getTextureId());
             runOnUiThread(this::openCameraForSharing);
         } catch (IOException | RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to initialize OpenGL resources", e);
@@ -1217,9 +1116,7 @@ public final class ScannerActivity extends Activity
     @Override
     public void onDrawFrame(GL10 gl) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
-        if (session == null || !arcoreActive) {
-            return;
-        }
+        if (session == null || !arcoreActive) return;
 
         synchronized (frameInUseLock) {
             try {
@@ -1253,17 +1150,13 @@ public final class ScannerActivity extends Activity
                     long currentTimestamp = depthImage.getTimestamp();
                     containsNewDepthData = currentTimestamp != depthTimestamp;
                     depthTimestamp = currentTimestamp;
-                } catch (NotYetAvailableException ignored) {
-                    // Normal while ARCore motion depth initializes.
-                }
+                } catch (NotYetAvailableException ignored) {}
 
                 if (containsNewDepthData) {
                     DepthData depth = DepthData.create(session, frame);
                     if (depth != null) {
                         pointCloudRenderer.update(depth);
-                        if (datasetCaptureManager != null) {
-                            datasetCaptureManager.onDepthFrame(depth, datasetRootPose);
-                        }
+                        if (datasetCaptureManager != null) datasetCaptureManager.onDepthFrame(depth, datasetRootPose);
                     }
                 }
 
@@ -1275,10 +1168,8 @@ public final class ScannerActivity extends Activity
                     pointCloudRenderer.draw(viewMatrix, projectionMatrix);
                 }
 
-                int photos = datasetCaptureManager == null
-                        ? 0 : datasetCaptureManager.getSavedCount();
-                String decision = datasetCaptureManager == null
-                        ? "dataset unavailable" : datasetCaptureManager.getLastDecision();
+                int photos = datasetCaptureManager == null ? 0 : datasetCaptureManager.getSavedCount();
+                String decision = datasetCaptureManager == null ? "dataset unavailable" : datasetCaptureManager.getLastDecision();
                 updateCaptureUi(photos, decision);
             } catch (Throwable t) {
                 DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed", t);
@@ -1289,15 +1180,11 @@ public final class ScannerActivity extends Activity
     }
 
     private void updateCaptureUi(int photos, String decision) {
-        if (captureFinalized || saveInProgress || processingModel) {
-            return;
-        }
+        if (captureFinalized || saveInProgress || processingModel) return;
         String title = photos > 0 ? "撮影できています" : "撮影中";
         String instruction = userInstructionForDecision(decision, photos);
         String signature = "capture|" + photos + "|" + instruction + "|" + captureEnvironment.name();
-        if (signature.equals(lastUiSignature)) {
-            return;
-        }
+        if (signature.equals(lastUiSignature)) return;
         lastUiSignature = signature;
         lastStatus = title + " / " + instruction;
         runOnUiThread(() -> {
@@ -1309,53 +1196,31 @@ public final class ScannerActivity extends Activity
     }
 
     private String userInstructionForDecision(String decision, int photos) {
-        if (decision == null) {
-            return photos == 0
-                    ? "対象の周りをゆっくり動かしてください。"
-                    : "少しずつ角度を変えて、対象の周りを撮影してください。";
-        }
+        if (decision == null) return photos == 0
+                ? "対象の周りをゆっくり動かしてください。"
+                : "少しずつ角度を変えて、対象の周りを撮影してください。";
         String lower = decision.toLowerCase(java.util.Locale.US);
-        if (lower.contains("too dark") || lower.contains("exposure quality")) {
-            return "少し明るい場所へ移動するか、照明をつけてください。";
-        }
-        if (lower.contains("lower blur")) {
-            return "端末をもう少しゆっくり動かしてください。";
-        }
-        if (lower.contains("focus") || lower.contains("lens")) {
-            return "ピントを合わせています。端末を少し止めてください。";
-        }
+        if (lower.contains("too dark") || lower.contains("exposure quality")) return "少し明るい場所へ移動するか、照明をつけてください。";
+        if (lower.contains("lower blur")) return "端末をもう少しゆっくり動かしてください。";
+        if (lower.contains("focus") || lower.contains("lens")) return "ピントを合わせています。端末を少し止めてください。";
         if (lower.contains("capture in flight")
                 || lower.contains("requesting texture photo")
-                || lower.contains("synchronized raw depth")) {
+                || lower.contains("waiting briefly for raw depth prior")) {
             return "写真を保存しています。端末を少し止めてください。";
         }
-        if (lower.contains("discarded photo")) {
-            return "この角度の写真を保存できませんでした。少しゆっくり動かして、もう一度撮影してください。";
-        }
-        if (lower.contains("next viewpoint") || lower.contains("new viewpoint")) {
-            return photos == 0
-                    ? "対象にカメラを向け、ゆっくり動かしてください。"
-                    : "少し角度を変えて、対象の周りをゆっくり撮影してください。";
-        }
-        if (lower.contains("saved frame")) {
-            return "写真を保存できました。別の角度からも続けてください。";
-        }
-        if (lower.contains("camera resumed") || lower.contains("capture resumed")) {
-            return "対象の周りをゆっくり動かして撮影を続けてください。";
-        }
-        if (lower.contains("camera not ready") || lower.contains("metadata")) {
-            return "カメラを準備しています。端末を少し止めてください。";
-        }
-        return photos == 0
-                ? "対象の周りをゆっくり動かしてください。"
-                : "別の角度からもゆっくり撮影してください。";
+        if (lower.contains("discarded photo")) return "この角度の写真を保存できませんでした。少しゆっくり動かして、もう一度撮影してください。";
+        if (lower.contains("next viewpoint") || lower.contains("new viewpoint")) return photos == 0
+                ? "対象にカメラを向け、ゆっくり動かしてください。"
+                : "少し角度を変えて、対象の周りをゆっくり撮影してください。";
+        if (lower.contains("saved frame")) return "写真を保存できました。別の角度からも続けてください。";
+        if (lower.contains("camera resumed") || lower.contains("capture resumed")) return "対象の周りをゆっくり動かして撮影を続けてください。";
+        if (lower.contains("camera not ready") || lower.contains("metadata")) return "カメラを準備しています。端末を少し止めてください。";
+        return photos == 0 ? "対象の周りをゆっくり動かしてください。" : "別の角度からもゆっくり撮影してください。";
     }
 
     private void showState(String title, String message) {
         String signature = "state|" + title + "|" + message;
-        if (signature.equals(lastUiSignature)) {
-            return;
-        }
+        if (signature.equals(lastUiSignature)) return;
         lastUiSignature = signature;
         lastStatus = title + " / " + message;
         int count = datasetCaptureManager == null ? 0 : datasetCaptureManager.getSavedCount();
@@ -1371,9 +1236,7 @@ public final class ScannerActivity extends Activity
 
     private void showOperation(String title, String message, int percent) {
         String signature = "op|" + title + "|" + message + "|" + percent;
-        if (signature.equals(lastUiSignature)) {
-            return;
-        }
+        if (signature.equals(lastUiSignature)) return;
         lastUiSignature = signature;
         lastStatus = title + " / " + message + " / " + percent;
         int count = datasetCaptureManager == null ? 0 : datasetCaptureManager.getSavedCount();
@@ -1383,9 +1246,8 @@ public final class ScannerActivity extends Activity
             captureCountView.setText((captureFinalized ? "保存した写真 " : "保存できた写真 ")
                     + count + "枚");
             progressBar.setVisibility(View.VISIBLE);
-            if (percent < 0) {
-                progressBar.setIndeterminate(true);
-            } else {
+            if (percent < 0) progressBar.setIndeterminate(true);
+            else {
                 progressBar.setIndeterminate(false);
                 progressBar.setProgress(Math.max(0, Math.min(100, percent)));
             }
@@ -1393,13 +1255,9 @@ public final class ScannerActivity extends Activity
     }
 
     private void showFeedback(String message) {
-        if (uiHandler == null || feedbackView == null) {
-            return;
-        }
+        if (uiHandler == null || feedbackView == null) return;
         runOnUiThread(() -> {
-            if (hideFeedbackRunnable != null) {
-                uiHandler.removeCallbacks(hideFeedbackRunnable);
-            }
+            if (hideFeedbackRunnable != null) uiHandler.removeCallbacks(hideFeedbackRunnable);
             feedbackView.setText(message);
             feedbackView.setVisibility(View.VISIBLE);
             hideFeedbackRunnable = () -> feedbackView.setVisibility(View.GONE);
@@ -1408,9 +1266,7 @@ public final class ScannerActivity extends Activity
     }
 
     private void updateDisplayGeometryIfNeeded() {
-        if (!displayGeometryChanged || viewportWidth == 0 || viewportHeight == 0) {
-            return;
-        }
+        if (!displayGeometryChanged || viewportWidth == 0 || viewportHeight == 0) return;
         session.setDisplayGeometry(
                 getWindowManager().getDefaultDisplay().getRotation(),
                 viewportWidth,
@@ -1422,105 +1278,66 @@ public final class ScannerActivity extends Activity
         int rotation = getWindowManager().getDefaultDisplay().getRotation();
         int displayDegrees;
         switch (rotation) {
-            case Surface.ROTATION_90:
-                displayDegrees = 90;
-                break;
-            case Surface.ROTATION_180:
-                displayDegrees = 180;
-                break;
-            case Surface.ROTATION_270:
-                displayDegrees = 270;
-                break;
+            case Surface.ROTATION_90: displayDegrees = 90; break;
+            case Surface.ROTATION_180: displayDegrees = 180; break;
+            case Surface.ROTATION_270: displayDegrees = 270; break;
             case Surface.ROTATION_0:
-            default:
-                displayDegrees = 0;
-                break;
+            default: displayDegrees = 0; break;
         }
         Integer sensorOrientation = cameraCharacteristics == null
-                ? null
-                : cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+                ? null : cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
         int sensor = sensorOrientation == null ? 90 : sensorOrientation;
         return (sensor - displayDegrees + 360) % 360;
     }
 
     private static boolean supportsManualSensor(CameraCharacteristics characteristics) {
-        int[] capabilities = characteristics.get(
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
-        return contains(
-                capabilities,
-                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
+        int[] capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        return contains(capabilities, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
     }
 
     private static boolean isFocusedState(Integer afState) {
-        if (afState == null) {
-            return true;
-        }
+        if (afState == null) return true;
         return afState == CaptureResult.CONTROL_AF_STATE_INACTIVE
                 || afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED
                 || afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED;
     }
 
-    private static long clampLong(long value, long min, long max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private static int clampInt(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
-    }
+    private static long clampLong(long value, long min, long max) { return Math.max(min, Math.min(max, value)); }
+    private static int clampInt(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
 
     private static boolean contains(int[] values, int target) {
-        if (values == null) {
-            return false;
-        }
-        for (int value : values) {
-            if (value == target) {
-                return true;
-            }
-        }
+        if (values == null) return false;
+        for (int value : values) if (value == target) return true;
         return false;
     }
 
     private static String cameraErrorName(int error) {
         switch (error) {
-            case CameraDevice.StateCallback.ERROR_CAMERA_IN_USE:
-                return "CAMERA_IN_USE";
-            case CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE:
-                return "MAX_CAMERAS_IN_USE";
-            case CameraDevice.StateCallback.ERROR_CAMERA_DISABLED:
-                return "CAMERA_DISABLED";
-            case CameraDevice.StateCallback.ERROR_CAMERA_DEVICE:
-                return "CAMERA_DEVICE";
-            case CameraDevice.StateCallback.ERROR_CAMERA_SERVICE:
-                return "CAMERA_SERVICE";
-            default:
-                return "UNKNOWN";
+            case CameraDevice.StateCallback.ERROR_CAMERA_IN_USE: return "CAMERA_IN_USE";
+            case CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE: return "MAX_CAMERAS_IN_USE";
+            case CameraDevice.StateCallback.ERROR_CAMERA_DISABLED: return "CAMERA_DISABLED";
+            case CameraDevice.StateCallback.ERROR_CAMERA_DEVICE: return "CAMERA_DEVICE";
+            case CameraDevice.StateCallback.ERROR_CAMERA_SERVICE: return "CAMERA_SERVICE";
+            default: return "UNKNOWN";
         }
     }
 
     private boolean hasCameraPermission() {
-        return checkSelfPermission(Manifest.permission.CAMERA)
-                == PackageManager.PERMISSION_GRANTED;
+        return checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void startCameraThread() {
-        if (cameraThread != null) {
-            return;
-        }
+        if (cameraThread != null) return;
         cameraThread = new HandlerThread("PointCloudCamera2");
         cameraThread.start();
         cameraHandler = new Handler(cameraThread.getLooper());
     }
 
     private void stopCameraThread() {
-        if (cameraThread == null) {
-            return;
-        }
+        if (cameraThread == null) return;
         cameraThread.quitSafely();
-        try {
-            cameraThread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        try { cameraThread.join(); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         cameraThread = null;
         cameraHandler = null;
     }
@@ -1539,18 +1356,9 @@ public final class ScannerActivity extends Activity
         }
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
-    @Override
-    public void onDisplayAdded(int displayId) {}
-
-    @Override
-    public void onDisplayRemoved(int displayId) {}
-
-    @Override
-    public void onDisplayChanged(int displayId) {
-        displayGeometryChanged = true;
-    }
+    @Override public void onDisplayAdded(int displayId) {}
+    @Override public void onDisplayRemoved(int displayId) {}
+    @Override public void onDisplayChanged(int displayId) { displayGeometryChanged = true; }
 }
