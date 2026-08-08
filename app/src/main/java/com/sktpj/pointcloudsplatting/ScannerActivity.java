@@ -72,13 +72,17 @@ public final class ScannerActivity extends Activity
     private static final int MENU_COPY_LOG = 1;
     private static final int MENU_COPY_DATASET_PATH = 2;
     private static final String HIGH_RES_CAPTURE_TAG = "dataset_texture_still";
-    private static final int MIN_3DGS_KEYFRAMES = 8;
 
-    // Prefer a short 1/500 exposure, but allow a practical indoor fallback rather than producing
-    // zero reconstruction images. Motion/focus gates still reject frames likely to be blurred.
     private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L; // 1/500 s
-    private static final long MAX_STILL_EXPOSURE_NS = 8_000_000L;    // 1/125 s
-    private static final int MAX_PHOTOGRAMMETRY_ISO = 6400;
+    private static final long INDOOR_MAX_STILL_EXPOSURE_NS = 8_000_000L; // 1/125 s
+    private static final int INDOOR_MAX_ISO = 6400;
+    private static final long OUTDOOR_MAX_STILL_EXPOSURE_NS = 4_000_000L; // 1/250 s
+    private static final int OUTDOOR_MAX_ISO = 3200;
+
+    private enum CaptureEnvironment {
+        INDOOR,
+        OUTDOOR
+    }
 
     private final PointCloudRenderer pointCloudRenderer = new PointCloudRenderer();
     private final CameraBackgroundRenderer cameraBackgroundRenderer = new CameraBackgroundRenderer();
@@ -87,6 +91,7 @@ public final class ScannerActivity extends Activity
     private GLSurfaceView surfaceView;
     private TextView statusView;
     private Button menuButton;
+    private Button modeButton;
     private Button saveButton;
     private Button gaussianButton;
     private DisplayManager displayManager;
@@ -123,6 +128,7 @@ public final class ScannerActivity extends Activity
     private volatile boolean saveInProgress;
     private volatile boolean runGaussianAfterSave;
     private volatile String finalizedDatasetPath;
+    private volatile CaptureEnvironment captureEnvironment = CaptureEnvironment.INDOOR;
     private Anchor datasetRootAnchor;
 
     // Latest repeating Camera2 result. This is converted to a short manual exposure for each still.
@@ -279,6 +285,12 @@ public final class ScannerActivity extends Activity
         menuButton.setPadding(0, 0, 0, 0);
         menuButton.setOnClickListener(v -> showMenu());
 
+        modeButton = new Button(this);
+        modeButton.setText(captureEnvironmentLabel());
+        modeButton.setTextColor(0xFFFFFFFF);
+        modeButton.setBackgroundColor(0xAA202020);
+        modeButton.setOnClickListener(v -> toggleCaptureEnvironment());
+
         saveButton = new Button(this);
         saveButton.setText("保存");
         saveButton.setTextColor(0xFFFFFFFF);
@@ -312,6 +324,11 @@ public final class ScannerActivity extends Activity
         menuParams.rightMargin = dp(6);
         root.addView(menuButton, menuParams);
 
+        FrameLayout.LayoutParams modeParams = new FrameLayout.LayoutParams(dp(104), dp(48));
+        modeParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        modeParams.bottomMargin = dp(80);
+        root.addView(modeButton, modeParams);
+
         FrameLayout.LayoutParams saveParams = new FrameLayout.LayoutParams(dp(132), dp(52));
         saveParams.gravity = Gravity.BOTTOM | Gravity.START;
         saveParams.leftMargin = dp(12);
@@ -333,7 +350,8 @@ public final class ScannerActivity extends Activity
             datasetCaptureManager = new DatasetCaptureManager(
                     DatasetCaptureManager.getPicturesDirectory(this));
             DiagnosticLog.i(TAG,
-                    "Dataset directory=" + datasetCaptureManager.getCaptureDirectoryPath());
+                    "Dataset directory=" + datasetCaptureManager.getCaptureDirectoryPath()
+                            + " captureMode=" + captureEnvironment.name());
         } catch (RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to initialize dataset directory", e);
         }
@@ -357,6 +375,45 @@ public final class ScannerActivity extends Activity
             return false;
         });
         popup.show();
+    }
+
+    private void toggleCaptureEnvironment() {
+        if (captureFinalized || saveInProgress) {
+            Toast.makeText(this, "保存確定後は撮影モードを変更できません", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        captureEnvironment = captureEnvironment == CaptureEnvironment.INDOOR
+                ? CaptureEnvironment.OUTDOOR
+                : CaptureEnvironment.INDOOR;
+        modeButton.setText(captureEnvironmentLabel());
+        DiagnosticLog.i(TAG,
+                "Capture environment changed to " + captureEnvironment.name()
+                        + " policy=" + capturePolicySummary());
+        Toast.makeText(this,
+                "撮影モード: " + captureEnvironmentLabel(), Toast.LENGTH_SHORT).show();
+    }
+
+    private String captureEnvironmentLabel() {
+        return captureEnvironment == CaptureEnvironment.INDOOR ? "室内" : "屋外";
+    }
+
+    private long maxStillExposureNs() {
+        return captureEnvironment == CaptureEnvironment.INDOOR
+                ? INDOOR_MAX_STILL_EXPOSURE_NS
+                : OUTDOOR_MAX_STILL_EXPOSURE_NS;
+    }
+
+    private int maxPhotogrammetryIso() {
+        return captureEnvironment == CaptureEnvironment.INDOOR
+                ? INDOOR_MAX_ISO
+                : OUTDOOR_MAX_ISO;
+    }
+
+    private String capturePolicySummary() {
+        if (captureEnvironment == CaptureEnvironment.INDOOR) {
+            return "室内 1/500 target / <=1/125 / ISO<=6400";
+        }
+        return "屋外 1/500 target / <=1/250 / ISO<=3200";
     }
 
     private String getCurrentDatasetPath() {
@@ -392,6 +449,7 @@ public final class ScannerActivity extends Activity
         saveInProgress = true;
         saveButton.setEnabled(false);
         gaussianButton.setEnabled(false);
+        modeButton.setEnabled(false);
         setStatus("保存処理中: keyframe書き込みを確定しています...");
 
         new Thread(() -> {
@@ -403,6 +461,7 @@ public final class ScannerActivity extends Activity
                     runGaussianAfterSave = false;
                     saveButton.setEnabled(true);
                     gaussianButton.setEnabled(true);
+                    modeButton.setEnabled(true);
                     setStatus("保存できませんでした。撮影中のフレーム完了後にもう一度押してください。");
                 });
                 return;
@@ -418,6 +477,7 @@ public final class ScannerActivity extends Activity
                     saveButton.setText("保存済み");
                     saveButton.setEnabled(false);
                     gaussianButton.setEnabled(true);
+                    modeButton.setEnabled(false);
                     setStatus("保存完了: " + result.frameCount + " keyframes\n"
                             + finalizedDatasetPath);
                     Toast.makeText(this, "データセットを保存しました", Toast.LENGTH_SHORT).show();
@@ -430,6 +490,7 @@ public final class ScannerActivity extends Activity
                     manager.resumeCapture();
                     saveButton.setEnabled(true);
                     gaussianButton.setEnabled(true);
+                    modeButton.setEnabled(true);
                     setStatus("保存失敗: " + result.message);
                 }
             });
@@ -445,15 +506,14 @@ public final class ScannerActivity extends Activity
         if (!captureFinalized || finalizedDatasetPath == null) {
             DatasetCaptureManager manager = datasetCaptureManager;
             int count = manager == null ? 0 : manager.getSavedCount();
-            if (count < MIN_3DGS_KEYFRAMES) {
-                String message = "3DGSには最低" + MIN_3DGS_KEYFRAMES
-                        + " keyframes必要です。現在" + count + "枚。撮影を続けてください。";
+            if (count == 0) {
+                String message = "3DGSに使えるkeyframeがまだありません。";
                 setStatus(message);
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show();
                 return;
             }
             runGaussianAfterSave = true;
-            setStatus("3DGS開始: datasetを保存確定しています...");
+            setStatus("3DGS開始: " + count + " keyframesを保存確定しています...");
             saveCurrentDataset();
             return;
         }
@@ -509,10 +569,12 @@ public final class ScannerActivity extends Activity
                 .append("sdk=").append(Build.VERSION.SDK_INT).append('\n')
                 .append("cameraId=").append(cameraId).append('\n')
                 .append("cameraConfig=").append(cameraConfigSummary).append('\n')
+                .append("captureMode=").append(captureEnvironment.name()).append('\n')
+                .append("capturePolicy=").append(capturePolicySummary()).append('\n')
                 .append("arcoreActive=").append(arcoreActive).append('\n')
                 .append("surfaceCreated=").append(surfaceCreated).append('\n')
                 .append("manualSensorSupported=").append(manualSensorSupported).append('\n')
-                .append("depthFrames=").append(pointCloudRenderer.getStoredFrameCount()).append('\n')
+                .append("depthPreviewFrames=").append(pointCloudRenderer.getStoredFrameCount()).append('\n')
                 .append("savedDatasetFrames=").append(photos).append('\n')
                 .append("captureFinalized=").append(captureFinalized).append('\n')
                 .append("photoDecision=").append(decision).append('\n')
@@ -838,10 +900,12 @@ public final class ScannerActivity extends Activity
             return "manual exposure range unavailable";
         }
 
+        long policyMaxExposure = maxStillExposureNs();
+        int policyMaxIso = maxPhotogrammetryIso();
         long minExposure = exposureRange.getLower();
-        long maxExposure = Math.min(exposureRange.getUpper(), MAX_STILL_EXPOSURE_NS);
+        long maxExposure = Math.min(exposureRange.getUpper(), policyMaxExposure);
         int minIso = isoRange.getLower();
-        int maxIso = Math.min(isoRange.getUpper(), MAX_PHOTOGRAMMETRY_ISO);
+        int maxIso = Math.min(isoRange.getUpper(), policyMaxIso);
         if (minExposure > maxExposure || minIso > maxIso) {
             return "invalid sensor exposure range";
         }
@@ -857,13 +921,13 @@ public final class ScannerActivity extends Activity
             iso = maxIso;
             long requiredExposure = (long) Math.ceil(exposureProduct / iso);
             if (requiredExposure > maxExposure) {
-                return "scene too dark even for <=1/125 and ISO<=6400";
+                return "scene too dark for " + capturePolicySummary();
             }
             exposure = clampLong(requiredExposure, minExposure, maxExposure);
         }
         iso = clampInt((int) Math.round(exposureProduct / exposure), minIso, maxIso);
-        if (exposure > MAX_STILL_EXPOSURE_NS || iso > MAX_PHOTOGRAMMETRY_ISO) {
-            return "exposure quality limit exceeded";
+        if (exposure > policyMaxExposure || iso > policyMaxIso) {
+            return "exposure quality limit exceeded for " + captureEnvironmentLabel();
         }
 
         still.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
@@ -879,7 +943,8 @@ public final class ScannerActivity extends Activity
         still.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
         still.set(CaptureRequest.LENS_FOCUS_DISTANCE, lockedFocusDistance);
         DiagnosticLog.i(TAG,
-                "Texture still exp=" + exposure + "ns ISO=" + iso
+                "Texture still mode=" + captureEnvironment.name()
+                        + " exp=" + exposure + "ns ISO=" + iso
                         + " focus=" + lockedFocusDistance + "D");
         return null;
     }
@@ -1045,11 +1110,10 @@ public final class ScannerActivity extends Activity
                 String captureState = captureFinalized
                         ? "saved" : (saveInProgress ? "saving" : "capturing");
                 setStatus(
-                        "Raw depth: " + pointCloudRenderer.getStoredFrameCount()
-                                + " / keyframes: " + photos + " / " + captureState
+                        "Depth preview: " + pointCloudRenderer.getStoredFrameCount()
+                                + " rolling / keyframes: " + photos + " / " + captureState
                                 + "\nphoto: " + decision
-                                + "\n3DGS: " + photos + "/" + MIN_3DGS_KEYFRAMES + "+ keyframes"
-                                + " / 1/500 target / <=1/125 / ISO<=6400"
+                                + "\nmode: " + capturePolicySummary()
                                 + "\n" + cameraConfigSummary);
             } catch (Throwable t) {
                 DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed", t);
