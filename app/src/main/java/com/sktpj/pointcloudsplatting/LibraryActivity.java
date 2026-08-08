@@ -70,21 +70,27 @@ public final class LibraryActivity extends Activity {
 
         Button back = new Button(this);
         back.setText("戻る");
+        back.setAllCaps(false);
+        back.setContentDescription("撮影画面に戻る");
+        back.setMinHeight(dp(48));
         back.setOnClickListener(v -> finish());
-        header.addView(back, new LinearLayout.LayoutParams(dp(84), dp(48)));
+        header.addView(back, new LinearLayout.LayoutParams(dp(84), dp(52)));
 
         TextView title = new TextView(this);
-        title.setText("3DGSライブラリ");
+        title.setText("保存したスキャン");
         title.setTextColor(0xFFFFFFFF);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, dp(52), 1f);
         header.addView(title, titleParams);
 
         Button reload = new Button(this);
-        reload.setText("再読込");
+        reload.setText("更新");
+        reload.setAllCaps(false);
+        reload.setContentDescription("保存したスキャンの一覧を更新する");
+        reload.setMinHeight(dp(48));
         reload.setOnClickListener(v -> reloadLibrary());
-        header.addView(reload, new LinearLayout.LayoutParams(dp(96), dp(48)));
+        header.addView(reload, new LinearLayout.LayoutParams(dp(84), dp(52)));
         root.addView(header);
 
         FrameLayout content = new FrameLayout(this);
@@ -105,10 +111,11 @@ public final class LibraryActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         emptyView = new TextView(this);
-        emptyView.setText("保存済みデータはまだありません");
-        emptyView.setTextColor(0xFFBBBBBB);
-        emptyView.setTextSize(18f);
+        emptyView.setText("保存したスキャンはまだありません\n\n撮影画面で対象の周りを撮影し、\n「撮影を保存」を押してください。");
+        emptyView.setTextColor(0xFFCCCCCC);
+        emptyView.setTextSize(17f);
         emptyView.setGravity(Gravity.CENTER);
+        emptyView.setPadding(dp(24), dp(24), dp(24), dp(24));
         content.addView(emptyView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -130,10 +137,11 @@ public final class LibraryActivity extends Activity {
     private View createDatasetCard(File dataset) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(6), dp(6), dp(6), dp(8));
+        card.setPadding(dp(8), dp(8), dp(8), dp(10));
+        card.setMinimumHeight(dp(220));
         GradientDrawable background = new GradientDrawable();
         background.setColor(0xFF282828);
-        background.setCornerRadius(dp(8));
+        background.setCornerRadius(dp(12));
         card.setBackground(background);
 
         GridLayout.LayoutParams params = new GridLayout.LayoutParams();
@@ -146,6 +154,7 @@ public final class LibraryActivity extends Activity {
         ImageView thumbnail = new ImageView(this);
         thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
         thumbnail.setBackgroundColor(0xFF151515);
+        thumbnail.setContentDescription("保存したスキャンの写真");
         Bitmap bitmap = decodeThumbnail(findFirstJpeg(dataset), 480, 360);
         if (bitmap != null) {
             thumbnail.setImageBitmap(bitmap);
@@ -158,18 +167,26 @@ public final class LibraryActivity extends Activity {
         name.setTextColor(0xFFFFFFFF);
         name.setTextSize(15f);
         name.setMaxLines(1);
-        name.setPadding(dp(4), dp(7), dp(4), 0);
+        name.setPadding(dp(4), dp(8), dp(4), 0);
         card.addView(name);
 
         TextView status = new TextView(this);
         status.setText(buildDatasetStatus(dataset));
-        status.setTextColor(0xFFCCCCCC);
-        status.setTextSize(13f);
-        status.setPadding(dp(4), dp(3), dp(4), dp(2));
+        status.setTextColor(0xFFDDDDDD);
+        status.setTextSize(14f);
+        status.setPadding(dp(4), dp(4), dp(4), dp(4));
         card.addView(status);
 
+        card.setContentDescription(buildCardDescription(dataset));
+        card.setClickable(true);
+        card.setFocusable(true);
         card.setOnClickListener(v -> openOrPrepare(dataset, status));
         return card;
+    }
+
+    private String buildCardDescription(File dataset) {
+        return formatDatasetName(dataset.getName()) + "。" + buildDatasetStatus(dataset)
+                .replace('\n', ' ') + "。タップして開く、または3Dモデルを作成する。";
     }
 
     private void openOrPrepare(File dataset, TextView status) {
@@ -180,37 +197,36 @@ public final class LibraryActivity extends Activity {
         }
 
         if (generationInProgress) {
-            Toast.makeText(this, "高品質Gaussian処理中です", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "3Dモデルを作成しています。少しお待ちください。",
+                    Toast.LENGTH_SHORT).show();
             return;
         }
         generationInProgress = true;
-        File prior = new File(dataset, DEPTH_PRIOR);
-        status.setText(prior.isFile()
-                ? "高解像度RGB反映中...\nJPEG + Pose + intrinsicsを使用"
-                : "Depth prior + 高解像度RGB処理中...");
-        Toast.makeText(this,
-                prior.isFile() ? "高解像度RGBをGaussianへ反映しています"
-                        : "Depth priorを作成後、高解像度RGBを反映します",
-                Toast.LENGTH_SHORT).show();
+        status.setText("3Dモデルを作成中\n撮影データを確認しています…");
         new Thread(() -> {
-            GaussianSplatJob.Result result = GaussianSplatJob.prepare(dataset);
+            GaussianSplatJob.Result result = GaussianSplatJob.prepare(
+                    dataset,
+                    (percent, message) -> runOnUiThread(() -> status.setText(
+                            "3Dモデルを作成中 " + percent + "%\n" + message)));
             runOnUiThread(() -> {
                 generationInProgress = false;
                 status.setText(buildDatasetStatus(dataset));
                 if (result.success || result.hqReady) {
-                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                     openViewer(dataset);
                 } else {
-                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
+                    status.setText("作成できませんでした\nタップしてもう一度試す");
+                    Toast.makeText(this,
+                            "3Dモデルを作成できませんでした。もう一度お試しください。",
+                            Toast.LENGTH_LONG).show();
                 }
             });
-        }, "LibraryHighQualityGaussian").start();
+        }, "LibraryCreateModel").start();
     }
 
     private void openViewer(File dataset) {
         if (!isViewableGaussian(dataset)) {
             Toast.makeText(this,
-                    "表示できるGaussianモデルがまだありません",
+                    "表示できる3Dモデルがまだありません。",
                     Toast.LENGTH_LONG).show();
             return;
         }
@@ -221,34 +237,19 @@ public final class LibraryActivity extends Activity {
 
     private String buildDatasetStatus(File dataset) {
         int frames = readFrameCount(dataset);
+        String photos = frames + "枚の写真";
         if (isPhotometricComplete(dataset)) {
-            int gaussians = readGaussianCount(dataset);
-            String gaussianText = gaussians > 0
-                    ? String.format(Locale.US, "%,d Gaussians", gaussians)
-                    : "3DGS学習済み";
-            return frames + " keyframes\n" + gaussianText + " / Full RGB最適化済み";
+            return photos + "\n3Dモデル作成済み";
         }
         if (isHqPreview(dataset)) {
-            int gaussians = readGaussianCount(dataset);
-            int textured = readTexturedGaussianCount(dataset);
-            String counts = gaussians > 0
-                    ? String.format(Locale.US, "HQ: %,d Gaussians", gaussians)
-                    : "HQ RGB反映済み";
-            if (textured > 0) {
-                counts += String.format(Locale.US, " / %,d RGB", textured);
-            }
-            return frames + " keyframes\n" + counts + "\nFull Vulkan最適化は未完了";
+            return photos + "\n3Dモデル作成済み";
         }
 
         File prior = new File(dataset, DEPTH_PRIOR);
         if (prior.isFile()) {
-            int gaussians = readGaussianCount(dataset);
-            String priorText = gaussians > 0
-                    ? String.format(Locale.US, "Depth prior: %,d Gaussians", gaussians)
-                    : "Depth prior準備済み";
-            return frames + " keyframes\n" + priorText + "\nタップで高解像度RGB反映";
+            return photos + "\nタップして3Dモデル作成を再開";
         }
-        return frames + " keyframes\n未処理 — タップでDepth + 高品質RGB";
+        return photos + "\nタップして3Dモデルを作成";
     }
 
     private static boolean isPhotometricComplete(File dataset) {
@@ -369,16 +370,6 @@ public final class LibraryActivity extends Activity {
         } catch (Exception ignored) {
         }
         return countJpegs(dataset);
-    }
-
-    private static int readGaussianCount(File dataset) {
-        JSONObject result = readResult(dataset);
-        return result == null ? 0 : result.optInt("gaussian_count", 0);
-    }
-
-    private static int readTexturedGaussianCount(File dataset) {
-        JSONObject result = readResult(dataset);
-        return result == null ? 0 : result.optInt("textured_gaussian_count", 0);
     }
 
     private static JSONObject readResult(File dataset) {
