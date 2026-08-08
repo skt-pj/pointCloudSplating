@@ -15,6 +15,14 @@
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
         <activity
+            android:name=".GaussianViewerActivity"
+            android:configChanges="orientation|screenSize"
+            android:exported="false" />
+        <activity
+            android:name=".LibraryActivity"
+            android:configChanges="orientation|screenSize"
+            android:exported="false" />
+        <activity
             android:name=".ScannerActivity"
             android:configChanges="orientation|screenSize"
             android:exported="true">
