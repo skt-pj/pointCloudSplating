@@ -19,9 +19,9 @@ package com.sktpj.pointcloudsplatting;
 
 import android.media.Image;
 
-import com.google.ar.core.Anchor;
 import com.google.ar.core.CameraIntrinsics;
 import com.google.ar.core.Frame;
+import com.google.ar.core.Pose;
 import com.google.ar.core.Session;
 import com.google.ar.core.exceptions.NotYetAvailableException;
 
@@ -31,18 +31,18 @@ import java.nio.FloatBuffer;
 public final class DepthData {
     private final FloatBuffer points;
     private final FloatBuffer colors;
-    private final Anchor anchor;
+    private final Pose cameraPose;
     private final long timestamp;
 
     private DepthData(
             FloatBuffer points,
             FloatBuffer colors,
             long timestamp,
-            Anchor cameraPoseAnchor) {
+            Pose cameraPose) {
         this.points = points;
         this.colors = colors;
         this.timestamp = timestamp;
-        this.anchor = cameraPoseAnchor;
+        this.cameraPose = cameraPose;
     }
 
     public static DepthData create(Session session, Frame frame) {
@@ -67,8 +67,13 @@ public final class DepthData {
                     imageRegionCoordinates,
                     maxNumberOfPointsToRender);
 
-            Anchor cameraPoseAnchor = session.createAnchor(frame.getCamera().getPose());
-            return new DepthData(points, colors, depthImage.getTimestamp(), cameraPoseAnchor);
+            // A depth sample only needs the camera pose at acquisition time. Creating an ARCore
+            // Anchor here is both unnecessary and unsafe: Session.createAnchor() throws
+            // NotTrackingException during short VIO interruptions, which previously stopped all
+            // subsequent Raw Depth updates for the scan. Pose is immutable and remains valid as
+            // the transform snapshot for this depth image.
+            Pose cameraPose = frame.getCamera().getPose();
+            return new DepthData(points, colors, depthImage.getTimestamp(), cameraPose);
         } catch (NotYetAvailableException e) {
             return null;
         }
@@ -84,8 +89,8 @@ public final class DepthData {
         return colors;
     }
 
-    public Anchor getAnchor() {
-        return anchor;
+    public Pose getCameraPose() {
+        return cameraPose;
     }
 
     public long getTimestamp() {
@@ -93,6 +98,6 @@ public final class DepthData {
     }
 
     public void getModelMatrix(float[] modelMatrix) {
-        anchor.getPose().toMatrix(modelMatrix, 0);
+        cameraPose.toMatrix(modelMatrix, 0);
     }
 }
