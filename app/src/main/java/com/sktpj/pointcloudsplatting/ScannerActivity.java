@@ -300,7 +300,8 @@ public final class ScannerActivity extends Activity
         saveButton.setOnClickListener(v -> saveCurrentDataset());
 
         gaussianButton = new Button(this);
-        gaussianButton.setText("3DGS化");
+        gaussianButton.setText("高品質3DGS");
+        gaussianButton.setTextSize(14f);
         gaussianButton.setTextColor(0xFFFFFFFF);
         gaussianButton.setBackgroundColor(0xAA202020);
         gaussianButton.setEnabled(true);
@@ -337,7 +338,7 @@ public final class ScannerActivity extends Activity
         saveParams.bottomMargin = dp(16);
         root.addView(saveButton, saveParams);
 
-        FrameLayout.LayoutParams gsParams = new FrameLayout.LayoutParams(dp(132), dp(52));
+        FrameLayout.LayoutParams gsParams = new FrameLayout.LayoutParams(dp(148), dp(52));
         gsParams.gravity = Gravity.BOTTOM | Gravity.END;
         gsParams.rightMargin = dp(12);
         gsParams.bottomMargin = dp(16);
@@ -514,35 +515,47 @@ public final class ScannerActivity extends Activity
             DatasetCaptureManager manager = datasetCaptureManager;
             int count = manager == null ? 0 : manager.getSavedCount();
             if (count == 0) {
-                String message = "3DGSに使えるkeyframeがまだありません。";
+                String message = "高品質Gaussianに使えるkeyframeがまだありません。";
                 setStatus(message);
                 Toast.makeText(this, message, Toast.LENGTH_LONG).show();
                 return;
             }
             runGaussianAfterSave = true;
-            setStatus("3DGS開始: " + count + " keyframesを保存確定しています...");
+            setStatus("高品質処理開始: " + count + " keyframesを保存確定しています...");
             saveCurrentDataset();
             return;
         }
 
         gaussianButton.setEnabled(false);
-        setStatus("3DGSを生成しています...");
+        setStatus("高品質Gaussian処理中...\nDepth + 高解像度JPEG + Pose + intrinsics");
         File datasetDirectory = new File(finalizedDatasetPath);
         new Thread(() -> {
             GaussianSplatJob.Result result = GaussianSplatJob.prepare(datasetDirectory);
             runOnUiThread(() -> {
                 gaussianButton.setEnabled(true);
+                String output = result.outputFile == null
+                        ? finalizedDatasetPath : result.outputFile.getAbsolutePath();
                 if (result.success) {
-                    String output = result.outputFile == null
-                            ? finalizedDatasetPath : result.outputFile.getAbsolutePath();
-                    setStatus("3DGS生成完了: " + result.gaussianCount + " Gaussians\n" + output);
-                    Toast.makeText(this, "3DGS生成完了", Toast.LENGTH_LONG).show();
+                    setStatus("Full 3DGS学習完了: " + result.gaussianCount
+                            + " Gaussians\n" + output);
+                    Toast.makeText(this, "Full 3DGS学習完了", Toast.LENGTH_LONG).show();
+                } else if (result.hqReady) {
+                    setStatus("高品質RGB反映完了: " + result.gaussianCount
+                            + " Gaussians\n高解像度JPEG + Pose + intrinsics反映済み\n"
+                            + "Full Vulkan L1+SSIM最適化は未完了\n" + output);
+                    Toast.makeText(this,
+                            "高品質RGB反映完了。ライブラリから表示できます。",
+                            Toast.LENGTH_LONG).show();
+                } else if (result.priorReady) {
+                    setStatus("Depth prior準備済み / 高品質RGB処理は未完了\n"
+                            + result.message + "\n" + output);
+                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 } else {
-                    setStatus("3DGS生成失敗: " + result.message);
+                    setStatus("高品質Gaussian処理失敗: " + result.message);
                     Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
                 }
             });
-        }, "Generate3DGS").start();
+        }, "GenerateHighQualityGaussian").start();
     }
 
     private void copyLogsToClipboard() {
