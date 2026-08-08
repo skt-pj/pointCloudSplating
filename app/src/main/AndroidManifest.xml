@@ -15,7 +15,7 @@
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
         <activity
-            android:name=".MainActivity"
+            android:name=".ScannerActivity"
             android:configChanges="orientation|screenSize"
             android:exported="true">
             <intent-filter>
