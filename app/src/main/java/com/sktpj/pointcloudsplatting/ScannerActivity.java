@@ -7,7 +7,10 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.ImageFormat;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -26,13 +29,17 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.Range;
 import android.util.Size;
 import android.view.Gravity;
 import android.view.Surface;
+import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.PopupMenu;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -70,9 +77,10 @@ public final class ScannerActivity extends Activity
 
     private static final String TAG = "PointCloudScanner";
     private static final int CAMERA_PERMISSION_REQUEST = 1001;
-    private static final int MENU_COPY_LOG = 1;
-    private static final int MENU_COPY_DATASET_PATH = 2;
-    private static final int MENU_LIBRARY = 3;
+    private static final int MENU_LIBRARY = 1;
+    private static final int MENU_COPY_LOG = 2;
+    private static final int MENU_COPY_DATASET_PATH = 3;
+    private static final int MENU_TOGGLE_POINTS = 4;
     private static final String HIGH_RES_CAPTURE_TAG = "dataset_texture_still";
 
     private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L; // 1/500 s
@@ -91,12 +99,18 @@ public final class ScannerActivity extends Activity
     private final Object frameInUseLock = new Object();
 
     private GLSurfaceView surfaceView;
+    private TextView statusTitleView;
     private TextView statusView;
+    private TextView captureCountView;
+    private TextView feedbackView;
+    private ProgressBar progressBar;
     private Button menuButton;
     private Button modeButton;
     private Button saveButton;
     private Button gaussianButton;
     private DisplayManager displayManager;
+    private Handler uiHandler;
+    private Runnable hideFeedbackRunnable;
 
     private Session session;
     private SharedCamera sharedCamera;
@@ -124,11 +138,14 @@ public final class ScannerActivity extends Activity
     private volatile int viewportWidth;
     private volatile int viewportHeight;
     private long depthTimestamp = -1L;
-    private String lastStatus = "";
+    private volatile String lastStatus = "";
+    private volatile String lastUiSignature = "";
     private String cameraConfigSummary = "camera=?";
     private volatile boolean captureFinalized;
     private volatile boolean saveInProgress;
+    private volatile boolean processingModel;
     private volatile boolean runGaussianAfterSave;
+    private volatile boolean showPointCloud;
     private volatile String finalizedDatasetPath;
     private volatile CaptureEnvironment captureEnvironment = CaptureEnvironment.INDOOR;
     private Anchor datasetRootAnchor;
@@ -156,7 +173,8 @@ public final class ScannerActivity extends Activity
                     device.close();
                     cameraDevice = null;
                     cameraOpening = false;
-                    setStatus("Camera disconnected. メニュー → ログをコピー");
+                    showState("カメラが切断されました",
+                            "アプリを開き直してください。直らない場合はメニューから診断情報をコピーしてください。");
                 }
 
                 @Override
@@ -167,8 +185,8 @@ public final class ScannerActivity extends Activity
                     device.close();
                     cameraDevice = null;
                     cameraOpening = false;
-                    setStatus("Camera2 error: " + error + " (" + cameraErrorName(error) + ")\n"
-                            + "メニュー → ログをコピー");
+                    showState("カメラを開始できませんでした",
+                            "アプリを開き直してください。直らない場合はメニューから診断情報をコピーしてください。");
                 }
 
                 @Override
@@ -194,7 +212,8 @@ public final class ScannerActivity extends Activity
                                 cameraHandler);
                     } catch (CameraAccessException | IllegalStateException e) {
                         DiagnosticLog.e(TAG, "Failed to start SharedCamera repeating request", e);
-                        setStatus("Failed to start camera stream.\nメニュー → ログをコピー");
+                        showState("カメラを開始できませんでした",
+                                "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
                     }
                 }
 
@@ -214,7 +233,8 @@ public final class ScannerActivity extends Activity
                 @Override
                 public void onConfigureFailed(CameraCaptureSession failedSession) {
                     DiagnosticLog.e(TAG, "Capture session configuration failed: " + cameraConfigSummary);
-                    setStatus("Camera stream configuration failed.\nメニュー → ログをコピー");
+                    showState("カメラを準備できませんでした",
+                            "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
                 }
 
                 @Override
@@ -263,6 +283,7 @@ public final class ScannerActivity extends Activity
                 "App create version=" + BuildConfig.VERSION_NAME
                         + " model=" + Build.MANUFACTURER + " " + Build.MODEL
                         + " sdk=" + Build.VERSION.SDK_INT);
+        uiHandler = new Handler(Looper.getMainLooper());
 
         surfaceView = new GLSurfaceView(this);
         surfaceView.setPreserveEGLContextOnPause(true);
@@ -271,78 +292,12 @@ public final class ScannerActivity extends Activity
         surfaceView.setRenderer(this);
         surfaceView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
-        statusView = new TextView(this);
-        statusView.setTextColor(0xFFFFFFFF);
-        statusView.setBackgroundColor(0x77000000);
-        statusView.setPadding(dp(12), dp(8), dp(12), dp(8));
-        statusView.setText("Starting ARCore SharedCamera...");
-
-        menuButton = new Button(this);
-        menuButton.setText("⋮");
-        menuButton.setTextSize(24f);
-        menuButton.setTextColor(0xFFFFFFFF);
-        menuButton.setBackgroundColor(0x77000000);
-        menuButton.setMinWidth(0);
-        menuButton.setMinHeight(0);
-        menuButton.setPadding(0, 0, 0, 0);
-        menuButton.setOnClickListener(v -> showMenu());
-
-        modeButton = new Button(this);
-        modeButton.setText(captureEnvironmentLabel());
-        modeButton.setTextColor(0xFFFFFFFF);
-        modeButton.setBackgroundColor(0xAA202020);
-        modeButton.setOnClickListener(v -> toggleCaptureEnvironment());
-
-        saveButton = new Button(this);
-        saveButton.setText("保存");
-        saveButton.setTextColor(0xFFFFFFFF);
-        saveButton.setBackgroundColor(0xAA202020);
-        saveButton.setOnClickListener(v -> saveCurrentDataset());
-
-        gaussianButton = new Button(this);
-        gaussianButton.setText("高品質3DGS");
-        gaussianButton.setTextSize(14f);
-        gaussianButton.setTextColor(0xFFFFFFFF);
-        gaussianButton.setBackgroundColor(0xAA202020);
-        gaussianButton.setEnabled(true);
-        gaussianButton.setOnClickListener(v -> startGaussianSplatting());
-
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(0xFF1A1A1A);
+        root.setBackgroundColor(0xFF101010);
         root.addView(surfaceView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
-
-        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT);
-        statusParams.gravity = Gravity.TOP | Gravity.START;
-        statusParams.leftMargin = dp(8);
-        statusParams.topMargin = dp(8);
-        root.addView(statusView, statusParams);
-
-        FrameLayout.LayoutParams menuParams = new FrameLayout.LayoutParams(dp(48), dp(48));
-        menuParams.gravity = Gravity.TOP | Gravity.END;
-        menuParams.topMargin = dp(6);
-        menuParams.rightMargin = dp(6);
-        root.addView(menuButton, menuParams);
-
-        FrameLayout.LayoutParams modeParams = new FrameLayout.LayoutParams(dp(104), dp(48));
-        modeParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        modeParams.bottomMargin = dp(80);
-        root.addView(modeButton, modeParams);
-
-        FrameLayout.LayoutParams saveParams = new FrameLayout.LayoutParams(dp(132), dp(52));
-        saveParams.gravity = Gravity.BOTTOM | Gravity.START;
-        saveParams.leftMargin = dp(12);
-        saveParams.bottomMargin = dp(16);
-        root.addView(saveButton, saveParams);
-
-        FrameLayout.LayoutParams gsParams = new FrameLayout.LayoutParams(dp(148), dp(52));
-        gsParams.gravity = Gravity.BOTTOM | Gravity.END;
-        gsParams.rightMargin = dp(12);
-        gsParams.bottomMargin = dp(16);
-        root.addView(gaussianButton, gsParams);
+        buildScannerUi(root);
         setContentView(root);
 
         displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -357,27 +312,172 @@ public final class ScannerActivity extends Activity
                             + " captureMode=" + captureEnvironment.name());
         } catch (RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to initialize dataset directory", e);
+            showState("撮影データを準備できませんでした",
+                    "空き容量を確認して、アプリを開き直してください。");
         }
+    }
+
+    private void buildScannerUi(FrameLayout root) {
+        LinearLayout statusCard = new LinearLayout(this);
+        statusCard.setOrientation(LinearLayout.VERTICAL);
+        statusCard.setPadding(dp(16), dp(12), dp(16), dp(12));
+        statusCard.setBackground(roundedBackground(0xD91A1A1A, 16));
+
+        statusTitleView = new TextView(this);
+        statusTitleView.setText("準備中");
+        statusTitleView.setTextColor(0xFFFFFFFF);
+        statusTitleView.setTextSize(19f);
+        statusTitleView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        statusCard.addView(statusTitleView);
+
+        statusView = new TextView(this);
+        statusView.setText("カメラを準備しています…");
+        statusView.setTextColor(0xFFF1F3F4);
+        statusView.setTextSize(15f);
+        statusView.setPadding(0, dp(4), 0, 0);
+        statusCard.addView(statusView);
+
+        captureCountView = new TextView(this);
+        captureCountView.setText("保存できた写真 0枚");
+        captureCountView.setTextColor(0xFFDADCE0);
+        captureCountView.setTextSize(14f);
+        captureCountView.setPadding(0, dp(8), 0, 0);
+        statusCard.addView(captureCountView);
+
+        progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setVisibility(View.GONE);
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(6));
+        progressParams.topMargin = dp(10);
+        statusCard.addView(progressBar, progressParams);
+
+        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        statusParams.gravity = Gravity.TOP;
+        statusParams.leftMargin = dp(12);
+        statusParams.rightMargin = dp(72);
+        statusParams.topMargin = dp(12);
+        root.addView(statusCard, statusParams);
+
+        menuButton = new Button(this);
+        menuButton.setText("⋮");
+        menuButton.setTextSize(24f);
+        menuButton.setTextColor(0xFFFFFFFF);
+        menuButton.setBackground(roundedBackground(0xD91A1A1A, 16));
+        menuButton.setMinWidth(dp(52));
+        menuButton.setMinHeight(dp(52));
+        menuButton.setPadding(0, 0, 0, 0);
+        menuButton.setContentDescription("メニュー");
+        menuButton.setOnClickListener(v -> showMenu());
+        FrameLayout.LayoutParams menuParams = new FrameLayout.LayoutParams(dp(52), dp(52));
+        menuParams.gravity = Gravity.TOP | Gravity.END;
+        menuParams.topMargin = dp(12);
+        menuParams.rightMargin = dp(12);
+        root.addView(menuButton, menuParams);
+
+        feedbackView = new TextView(this);
+        feedbackView.setTextColor(0xFFFFFFFF);
+        feedbackView.setTextSize(14f);
+        feedbackView.setGravity(Gravity.CENTER);
+        feedbackView.setPadding(dp(16), dp(12), dp(16), dp(12));
+        feedbackView.setBackground(roundedBackground(0xEE202124, 16));
+        feedbackView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams feedbackParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        feedbackParams.gravity = Gravity.BOTTOM;
+        feedbackParams.leftMargin = dp(24);
+        feedbackParams.rightMargin = dp(24);
+        feedbackParams.bottomMargin = dp(162);
+        root.addView(feedbackView, feedbackParams);
+
+        modeButton = new Button(this);
+        modeButton.setText(captureEnvironmentLabel());
+        styleButton(modeButton, 0xDD303134, 14f);
+        modeButton.setContentDescription("撮影モードを切り替える");
+        modeButton.setOnClickListener(v -> toggleCaptureEnvironment());
+        FrameLayout.LayoutParams modeParams = new FrameLayout.LayoutParams(dp(104), dp(48));
+        modeParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        modeParams.bottomMargin = dp(102);
+        root.addView(modeButton, modeParams);
+
+        LinearLayout actionBar = new LinearLayout(this);
+        actionBar.setOrientation(LinearLayout.HORIZONTAL);
+        actionBar.setGravity(Gravity.CENTER_VERTICAL);
+        actionBar.setPadding(dp(8), dp(8), dp(8), dp(8));
+        actionBar.setBackground(roundedBackground(0xE6151515, 20));
+
+        saveButton = new Button(this);
+        saveButton.setText("撮影を保存");
+        styleButton(saveButton, 0xFF3C4043, 15f);
+        saveButton.setContentDescription("撮影した写真を保存する");
+        saveButton.setOnClickListener(v -> saveCurrentDataset());
+        LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(0, dp(56), 0.42f);
+        saveParams.rightMargin = dp(6);
+        actionBar.addView(saveButton, saveParams);
+
+        gaussianButton = new Button(this);
+        gaussianButton.setText("3Dモデルを作成");
+        styleButton(gaussianButton, 0xFF0B57D0, 15f);
+        gaussianButton.setContentDescription("撮影した写真から3Dモデルを作成する");
+        gaussianButton.setOnClickListener(v -> startGaussianSplatting());
+        LinearLayout.LayoutParams modelParams = new LinearLayout.LayoutParams(0, dp(56), 0.58f);
+        modelParams.leftMargin = dp(6);
+        actionBar.addView(gaussianButton, modelParams);
+
+        FrameLayout.LayoutParams actionParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(72));
+        actionParams.gravity = Gravity.BOTTOM;
+        actionParams.leftMargin = dp(12);
+        actionParams.rightMargin = dp(12);
+        actionParams.bottomMargin = dp(16);
+        root.addView(actionBar, actionParams);
+    }
+
+    private void styleButton(Button button, int backgroundColor, float textSizeSp) {
+        button.setAllCaps(false);
+        button.setTextColor(0xFFFFFFFF);
+        button.setTextSize(textSizeSp);
+        button.setMinHeight(dp(48));
+        button.setBackgroundTintList(ColorStateList.valueOf(backgroundColor));
+    }
+
+    private GradientDrawable roundedBackground(int color, int radiusDp) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(dp(radiusDp));
+        return background;
     }
 
     private void showMenu() {
         PopupMenu popup = new PopupMenu(this, menuButton);
-        popup.getMenu().add(0, MENU_COPY_LOG, 0, "ログをコピー");
-        popup.getMenu().add(0, MENU_COPY_DATASET_PATH, 1, "保存先をコピー");
-        popup.getMenu().add(0, MENU_LIBRARY, 2, "ライブラリ");
+        popup.getMenu().add(0, MENU_LIBRARY, 0, "保存したスキャン");
+        popup.getMenu().add(0, MENU_COPY_LOG, 1, "診断情報をコピー");
+        popup.getMenu().add(0, MENU_COPY_DATASET_PATH, 2, "保存場所をコピー");
+        popup.getMenu().add(0, MENU_TOGGLE_POINTS, 3,
+                showPointCloud ? "計測点を隠す" : "計測点を表示（診断用）");
         popup.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == MENU_LIBRARY) {
+                startActivity(new Intent(this, LibraryActivity.class));
+                return true;
+            }
             if (item.getItemId() == MENU_COPY_LOG) {
                 copyLogsToClipboard();
                 return true;
             }
             if (item.getItemId() == MENU_COPY_DATASET_PATH) {
-                String path = getCurrentDatasetPath();
-                copyText("pointCloudSplating dataset", path);
-                Toast.makeText(this, "保存先をコピーしました", Toast.LENGTH_SHORT).show();
+                copyText("pointCloudSplating dataset", getCurrentDatasetPath());
+                showFeedback("保存場所をコピーしました");
                 return true;
             }
-            if (item.getItemId() == MENU_LIBRARY) {
-                startActivity(new Intent(this, LibraryActivity.class));
+            if (item.getItemId() == MENU_TOGGLE_POINTS) {
+                showPointCloud = !showPointCloud;
+                DiagnosticLog.i(TAG, "Diagnostic point overlay=" + showPointCloud);
+                showFeedback(showPointCloud
+                        ? "診断用の計測点を表示します"
+                        : "計測点を隠しました。撮影はそのまま続きます");
                 return true;
             }
             return false;
@@ -386,8 +486,8 @@ public final class ScannerActivity extends Activity
     }
 
     private void toggleCaptureEnvironment() {
-        if (captureFinalized || saveInProgress) {
-            Toast.makeText(this, "保存確定後は撮影モードを変更できません", Toast.LENGTH_SHORT).show();
+        if (captureFinalized || saveInProgress || processingModel) {
+            showFeedback("撮影を保存した後は撮影モードを変更できません");
             return;
         }
         captureEnvironment = captureEnvironment == CaptureEnvironment.INDOOR
@@ -397,8 +497,9 @@ public final class ScannerActivity extends Activity
         DiagnosticLog.i(TAG,
                 "Capture environment changed to " + captureEnvironment.name()
                         + " policy=" + capturePolicySummary());
-        Toast.makeText(this,
-                "撮影モード: " + captureEnvironmentLabel(), Toast.LENGTH_SHORT).show();
+        showFeedback(captureEnvironment == CaptureEnvironment.INDOOR
+                ? "室内向けの撮影に切り替えました"
+                : "屋外向けの撮影に切り替えました");
     }
 
     private String captureEnvironmentLabel() {
@@ -437,7 +538,7 @@ public final class ScannerActivity extends Activity
         DatasetCaptureManager manager = datasetCaptureManager;
         if (manager == null) {
             runGaussianAfterSave = false;
-            Toast.makeText(this, "保存対象がありません", Toast.LENGTH_SHORT).show();
+            showFeedback("撮影データを保存できる状態ではありません");
             return;
         }
         if (captureFinalized) {
@@ -445,12 +546,12 @@ public final class ScannerActivity extends Activity
                 runGaussianAfterSave = false;
                 startGaussianSplatting();
             } else {
-                Toast.makeText(this, "すでに保存済みです", Toast.LENGTH_SHORT).show();
+                showFeedback("この撮影はすでに保存されています");
             }
             return;
         }
         if (saveInProgress) {
-            Toast.makeText(this, "保存処理中です", Toast.LENGTH_SHORT).show();
+            showFeedback("いま撮影を保存しています。少しお待ちください");
             return;
         }
 
@@ -458,7 +559,7 @@ public final class ScannerActivity extends Activity
         saveButton.setEnabled(false);
         gaussianButton.setEnabled(false);
         modeButton.setEnabled(false);
-        setStatus("保存処理中: keyframe書き込みを確定しています...");
+        showOperation("撮影を保存しています", "最後の写真を保存しています…", -1);
 
         new Thread(() -> {
             boolean flushed = manager.stopCaptureAndFlush(5_000L);
@@ -470,7 +571,8 @@ public final class ScannerActivity extends Activity
                     saveButton.setEnabled(true);
                     gaussianButton.setEnabled(true);
                     modeButton.setEnabled(true);
-                    setStatus("保存できませんでした。撮影中のフレーム完了後にもう一度押してください。");
+                    showState("保存できませんでした",
+                            "写真の保存が終わるまで少し待って、もう一度「撮影を保存」を押してください。");
                 });
                 return;
             }
@@ -482,13 +584,13 @@ public final class ScannerActivity extends Activity
                 if (result.success) {
                     captureFinalized = true;
                     finalizedDatasetPath = result.directory.getAbsolutePath();
-                    saveButton.setText("保存済み");
+                    saveButton.setText("撮影済み");
                     saveButton.setEnabled(false);
                     gaussianButton.setEnabled(true);
                     modeButton.setEnabled(false);
-                    setStatus("保存完了: " + result.frameCount + " keyframes\n"
-                            + finalizedDatasetPath);
-                    Toast.makeText(this, "データセットを保存しました", Toast.LENGTH_SHORT).show();
+                    captureCountView.setText("保存した写真 " + result.frameCount + "枚");
+                    showState("撮影を保存しました",
+                            result.frameCount + "枚の写真を保存しました。3Dモデルを作成できます。");
                     if (runGaussianAfterSave) {
                         runGaussianAfterSave = false;
                         startGaussianSplatting();
@@ -499,7 +601,8 @@ public final class ScannerActivity extends Activity
                     saveButton.setEnabled(true);
                     gaussianButton.setEnabled(true);
                     modeButton.setEnabled(true);
-                    setStatus("保存失敗: " + result.message);
+                    showState("保存できませんでした",
+                            "まだ保存できた写真がありません。対象の周りをゆっくり撮影してから、もう一度お試しください。");
                 }
             });
         }, "FinalizeDataset").start();
@@ -507,64 +610,83 @@ public final class ScannerActivity extends Activity
 
     private void startGaussianSplatting() {
         if (saveInProgress) {
-            Toast.makeText(this, "保存処理中です", Toast.LENGTH_SHORT).show();
+            showFeedback("撮影の保存が終わるまで少しお待ちください");
+            return;
+        }
+        if (processingModel) {
+            showFeedback("3Dモデルを作成しています。このままお待ちください");
             return;
         }
 
         if (!captureFinalized || finalizedDatasetPath == null) {
             DatasetCaptureManager manager = datasetCaptureManager;
             int count = manager == null ? 0 : manager.getSavedCount();
-            if (count == 0) {
-                String message = "高品質Gaussianに使えるkeyframeがまだありません。";
-                setStatus(message);
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            String decision = manager == null ? "" : manager.getLastDecision();
+            if (count == 0 && !decisionIndicatesPendingPhoto(decision)) {
+                showFeedback("まだ写真を保存できていません。上の「保存できた写真」が増えるまで、対象の周りをゆっくり撮影してください。");
+                updateCaptureUi(count, decision);
                 return;
             }
             runGaussianAfterSave = true;
-            setStatus("高品質処理開始: " + count + " keyframesを保存確定しています...");
+            showOperation("3Dモデルを作成します", "最後の写真を保存しています…", -1);
             saveCurrentDataset();
             return;
         }
 
+        processingModel = true;
         gaussianButton.setEnabled(false);
-        setStatus("高品質Gaussian処理中...\nDepth + 高解像度JPEG + Pose + intrinsics");
+        saveButton.setEnabled(false);
+        modeButton.setEnabled(false);
+        showOperation("3Dモデルを作成中", "撮影データを確認しています…", 0);
         File datasetDirectory = new File(finalizedDatasetPath);
         new Thread(() -> {
-            GaussianSplatJob.Result result = GaussianSplatJob.prepare(datasetDirectory);
+            GaussianSplatJob.Result result = GaussianSplatJob.prepare(
+                    datasetDirectory,
+                    (percent, message) -> runOnUiThread(() ->
+                            showOperation("3Dモデルを作成中", message, percent)));
             runOnUiThread(() -> {
+                processingModel = false;
                 gaussianButton.setEnabled(true);
-                String output = result.outputFile == null
-                        ? finalizedDatasetPath : result.outputFile.getAbsolutePath();
-                if (result.success) {
-                    setStatus("Full 3DGS学習完了: " + result.gaussianCount
-                            + " Gaussians\n" + output);
-                    Toast.makeText(this, "Full 3DGS学習完了", Toast.LENGTH_LONG).show();
-                } else if (result.hqReady) {
-                    setStatus("高品質RGB反映完了: " + result.gaussianCount
-                            + " Gaussians\n高解像度JPEG + Pose + intrinsics反映済み\n"
-                            + "Full Vulkan L1+SSIM最適化は未完了\n" + output);
-                    Toast.makeText(this,
-                            "高品質RGB反映完了。ライブラリから表示できます。",
-                            Toast.LENGTH_LONG).show();
+                if (result.success || result.hqReady) {
+                    showOperation("3Dモデルを作成しました",
+                            "完成したモデルを表示します。", 100);
+                    openViewer(datasetDirectory);
                 } else if (result.priorReady) {
-                    setStatus("Depth prior準備済み / 高品質RGB処理は未完了\n"
-                            + result.message + "\n" + output);
-                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
+                    showState("3Dモデルを仕上げられませんでした",
+                            "撮影データは保存されています。「3Dモデルを作成」をもう一度押してください。");
+                    showFeedback("撮影データは失われていません。もう一度作成できます");
                 } else {
-                    setStatus("高品質Gaussian処理失敗: " + result.message);
-                    Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
+                    showState("3Dモデルを作成できませんでした",
+                            "保存したスキャンを確認して、もう一度お試しください。直らない場合は診断情報をコピーしてください。");
+                    DiagnosticLog.w(TAG, "Model creation failed userMessage=" + result.message);
                 }
             });
         }, "GenerateHighQualityGaussian").start();
     }
 
+    private void openViewer(File datasetDirectory) {
+        Intent intent = new Intent(this, GaussianViewerActivity.class);
+        intent.putExtra(GaussianViewerActivity.EXTRA_DATASET_PATH,
+                datasetDirectory.getAbsolutePath());
+        startActivity(intent);
+    }
+
+    private static boolean decisionIndicatesPendingPhoto(String decision) {
+        if (decision == null) {
+            return false;
+        }
+        return decision.contains("photo capture in flight")
+                || decision.contains("requesting texture photo")
+                || decision.contains("waiting for synchronized Raw Depth");
+    }
+
     private void copyLogsToClipboard() {
-        Toast.makeText(this, "ログを収集中…", Toast.LENGTH_SHORT).show();
+        showFeedback("診断情報を準備しています…");
         new Thread(() -> {
             String report = buildDiagnosticReport();
             runOnUiThread(() -> {
-                copyText("pointCloudSplating log", report);
-                Toast.makeText(this, "ログをコピーしました", Toast.LENGTH_SHORT).show();
+                copyText("pointCloudSplating diagnostics", report);
+                showFeedback("診断情報をコピーしました");
             });
         }, "CopyDiagnostics").start();
     }
@@ -572,7 +694,9 @@ public final class ScannerActivity extends Activity
     private void copyText(String label, String text) {
         ClipboardManager clipboard =
                 (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
+        }
     }
 
     private String buildDiagnosticReport() {
@@ -597,6 +721,7 @@ public final class ScannerActivity extends Activity
                 .append("depthPreviewFrames=").append(pointCloudRenderer.getStoredFrameCount()).append('\n')
                 .append("savedDatasetFrames=").append(photos).append('\n')
                 .append("captureFinalized=").append(captureFinalized).append('\n')
+                .append("processingModel=").append(processingModel).append('\n')
                 .append("photoDecision=").append(decision).append('\n')
                 .append("dataset=").append(dataset).append('\n')
                 .append("status=").append(lastStatus).append("\n\n")
@@ -655,7 +780,9 @@ public final class ScannerActivity extends Activity
         if (surfaceCreated) {
             openCameraForSharing();
         }
-        setStatus("Starting Pixel 10a SharedCamera / Raw Depth...");
+        if (!captureFinalized && !processingModel) {
+            showState("準備中", "カメラを準備しています…");
+        }
     }
 
     private boolean createSharedArSession() {
@@ -674,7 +801,8 @@ public final class ScannerActivity extends Activity
 
             if (!session.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
                 DiagnosticLog.e(TAG, "RAW_DEPTH_ONLY unsupported with selected SharedCamera config");
-                setStatus("Raw Depth is not available with this SharedCamera config.");
+                showState("この端末では計測を開始できません",
+                        "必要な深度計測を利用できません。診断情報をコピーして確認してください。");
                 session.close();
                 session = null;
                 return false;
@@ -717,20 +845,24 @@ public final class ScannerActivity extends Activity
         } catch (UnavailableArcoreNotInstalledException
                  | UnavailableUserDeclinedInstallationException e) {
             DiagnosticLog.e(TAG, "ARCore is required", e);
-            setStatus("Google Play Services for AR is required.");
+            showState("AR機能を利用できません",
+                    "Google Play 開発者サービス（AR）をインストールしてから、もう一度開いてください。");
         } catch (UnavailableApkTooOldException e) {
             DiagnosticLog.e(TAG, "ARCore APK too old", e);
-            setStatus("Update Google Play Services for AR.");
+            showState("AR機能の更新が必要です",
+                    "Google Play 開発者サービス（AR）を更新してください。");
         } catch (UnavailableSdkTooOldException e) {
             DiagnosticLog.e(TAG, "ARCore SDK too old", e);
-            setStatus("Update this app / ARCore SDK.");
+            showState("アプリの更新が必要です",
+                    "最新のpointCloudSplatingをインストールしてください。");
         } catch (UnavailableDeviceNotCompatibleException e) {
             DiagnosticLog.e(TAG, "Device is not ARCore compatible", e);
-            setStatus("This device is not ARCore compatible.");
+            showState("この端末では利用できません",
+                    "この端末は必要なAR機能に対応していません。");
         } catch (CameraAccessException | RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to configure SharedCamera", e);
-            setStatus("Failed to configure SharedCamera: " + e.getClass().getSimpleName()
-                    + "\nメニュー → ログをコピー");
+            showState("カメラを準備できませんでした",
+                    "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
         }
 
         if (datasetRootAnchor != null) {
@@ -766,7 +898,8 @@ public final class ScannerActivity extends Activity
         } catch (CameraAccessException | SecurityException | IllegalArgumentException e) {
             cameraOpening = false;
             DiagnosticLog.e(TAG, "Failed to open SharedCamera", e);
-            setStatus("Failed to open SharedCamera.\nメニュー → ログをコピー");
+            showState("カメラを開けませんでした",
+                    "カメラの許可を確認して、アプリを開き直してください。");
         }
     }
 
@@ -798,7 +931,8 @@ public final class ScannerActivity extends Activity
             cameraDevice.createCaptureSession(sessionSurfaces, wrapped, cameraHandler);
         } catch (CameraAccessException | IllegalStateException | IllegalArgumentException e) {
             DiagnosticLog.e(TAG, "Failed to create SharedCamera capture session", e);
-            setStatus("Failed to create capture session.\nメニュー → ログをコピー");
+            showState("カメラを準備できませんでした",
+                    "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
         }
     }
 
@@ -808,12 +942,16 @@ public final class ScannerActivity extends Activity
         }
         try {
             session.resume();
+            if (datasetCaptureManager != null) {
+                datasetCaptureManager.onCameraResumed();
+            }
             arcoreActive = true;
             sharedCamera.setCaptureCallback(cameraCaptureCallback, cameraHandler);
             DiagnosticLog.i(TAG, "ARCore resumed with SharedCamera");
         } catch (CameraNotAvailableException e) {
             DiagnosticLog.e(TAG, "Camera unavailable while resuming ARCore", e);
-            setStatus("Camera unavailable.\nメニュー → ログをコピー");
+            showState("カメラを利用できません",
+                    "ほかのアプリがカメラを使用していないか確認して、もう一度お試しください。");
         }
     }
 
@@ -854,8 +992,8 @@ public final class ScannerActivity extends Activity
                 still.addTarget(jpegReader.getSurface());
                 still.setTag(HIGH_RES_CAPTURE_TAG);
                 still.set(CaptureRequest.JPEG_QUALITY, (byte) 95);
-                // Keep the encoded pixels in sensor/readout orientation so camera pose and
-                // intrinsics have one deterministic convention for 3DGS input.
+                // Keep encoded pixels in sensor/readout orientation so camera pose and intrinsics
+                // stay in one deterministic convention for reconstruction.
                 still.set(CaptureRequest.JPEG_ORIENTATION, 0);
                 still.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
                 still.set(
@@ -892,7 +1030,7 @@ public final class ScannerActivity extends Activity
         });
     }
 
-    /** Returns null on success or a human-readable reason to skip this frame. */
+    /** Returns null on success or an internal reason to skip this frame. */
     private String applyPhotogrammetryExposureAndFocus(CaptureRequest.Builder still) {
         if (!manualSensorSupported) {
             return "manual sensor unsupported";
@@ -988,6 +1126,9 @@ public final class ScannerActivity extends Activity
             }
         }
         closeCamera();
+        if (datasetCaptureManager != null) {
+            datasetCaptureManager.onCameraPaused();
+        }
         super.onPause();
     }
 
@@ -1024,6 +1165,9 @@ public final class ScannerActivity extends Activity
             session.close();
             session = null;
         }
+        if (uiHandler != null && hideFeedbackRunnable != null) {
+            uiHandler.removeCallbacks(hideFeedbackRunnable);
+        }
         stopCameraThread();
         super.onDestroy();
     }
@@ -1038,7 +1182,9 @@ public final class ScannerActivity extends Activity
         if (hasCameraPermission()) {
             recreate();
         } else {
-            Toast.makeText(this, "Camera permission is required.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this,
+                    "3Dスキャンにはカメラの許可が必要です。",
+                    Toast.LENGTH_LONG).show();
             finish();
         }
     }
@@ -1055,7 +1201,8 @@ public final class ScannerActivity extends Activity
             runOnUiThread(this::openCameraForSharing);
         } catch (IOException | RuntimeException e) {
             DiagnosticLog.e(TAG, "Failed to initialize OpenGL resources", e);
-            setStatus("Failed to initialize OpenGL resources.\nメニュー → ログをコピー");
+            showState("画面を準備できませんでした",
+                    "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
         }
     }
 
@@ -1082,7 +1229,10 @@ public final class ScannerActivity extends Activity
 
                 Camera camera = frame.getCamera();
                 if (camera.getTrackingState() != TrackingState.TRACKING) {
-                    setStatus("AR tracking paused. Move slowly and keep scene detail visible.");
+                    if (!saveInProgress && !processingModel && !captureFinalized) {
+                        showState("位置を確認しています",
+                                "端末をゆっくり動かし、模様のある場所へカメラを向けてください。");
+                    }
                     return;
                 }
 
@@ -1117,30 +1267,144 @@ public final class ScannerActivity extends Activity
                     }
                 }
 
-                float[] projectionMatrix = new float[16];
-                camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f);
-                float[] viewMatrix = new float[16];
-                camera.getViewMatrix(viewMatrix, 0);
-                pointCloudRenderer.draw(viewMatrix, projectionMatrix);
+                if (showPointCloud) {
+                    float[] projectionMatrix = new float[16];
+                    camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f);
+                    float[] viewMatrix = new float[16];
+                    camera.getViewMatrix(viewMatrix, 0);
+                    pointCloudRenderer.draw(viewMatrix, projectionMatrix);
+                }
 
                 int photos = datasetCaptureManager == null
                         ? 0 : datasetCaptureManager.getSavedCount();
                 String decision = datasetCaptureManager == null
                         ? "dataset unavailable" : datasetCaptureManager.getLastDecision();
-                String captureState = captureFinalized
-                        ? "saved" : (saveInProgress ? "saving" : "capturing");
-                setStatus(
-                        "Depth preview: " + pointCloudRenderer.getStoredFrameCount()
-                                + " rolling / keyframes: " + photos + " / " + captureState
-                                + "\nphoto: " + decision
-                                + "\nmode: " + capturePolicySummary()
-                                + "\n" + cameraConfigSummary);
+                updateCaptureUi(photos, decision);
             } catch (Throwable t) {
                 DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed", t);
-                setStatus("Frame processing failed: " + t.getClass().getSimpleName()
-                        + "\nメニュー → ログをコピー");
+                showState("撮影を続けられませんでした",
+                        "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
             }
         }
+    }
+
+    private void updateCaptureUi(int photos, String decision) {
+        if (captureFinalized || saveInProgress || processingModel) {
+            return;
+        }
+        String title = photos > 0 ? "撮影できています" : "撮影中";
+        String instruction = userInstructionForDecision(decision, photos);
+        String signature = "capture|" + photos + "|" + instruction + "|" + captureEnvironment.name();
+        if (signature.equals(lastUiSignature)) {
+            return;
+        }
+        lastUiSignature = signature;
+        lastStatus = title + " / " + instruction;
+        runOnUiThread(() -> {
+            statusTitleView.setText(title);
+            statusView.setText(instruction);
+            captureCountView.setText("保存できた写真 " + photos + "枚");
+            progressBar.setVisibility(View.GONE);
+        });
+    }
+
+    private String userInstructionForDecision(String decision, int photos) {
+        if (decision == null) {
+            return photos == 0
+                    ? "対象の周りをゆっくり動かしてください。"
+                    : "少しずつ角度を変えて、対象の周りを撮影してください。";
+        }
+        String lower = decision.toLowerCase(java.util.Locale.US);
+        if (lower.contains("too dark") || lower.contains("exposure quality")) {
+            return "少し明るい場所へ移動するか、照明をつけてください。";
+        }
+        if (lower.contains("lower blur")) {
+            return "端末をもう少しゆっくり動かしてください。";
+        }
+        if (lower.contains("focus") || lower.contains("lens")) {
+            return "ピントを合わせています。端末を少し止めてください。";
+        }
+        if (lower.contains("capture in flight")
+                || lower.contains("requesting texture photo")
+                || lower.contains("synchronized raw depth")) {
+            return "写真を保存しています。端末を少し止めてください。";
+        }
+        if (lower.contains("discarded photo")) {
+            return "この角度の写真を保存できませんでした。少しゆっくり動かして、もう一度撮影してください。";
+        }
+        if (lower.contains("next viewpoint") || lower.contains("new viewpoint")) {
+            return photos == 0
+                    ? "対象にカメラを向け、ゆっくり動かしてください。"
+                    : "少し角度を変えて、対象の周りをゆっくり撮影してください。";
+        }
+        if (lower.contains("saved frame")) {
+            return "写真を保存できました。別の角度からも続けてください。";
+        }
+        if (lower.contains("camera resumed") || lower.contains("capture resumed")) {
+            return "対象の周りをゆっくり動かして撮影を続けてください。";
+        }
+        if (lower.contains("camera not ready") || lower.contains("metadata")) {
+            return "カメラを準備しています。端末を少し止めてください。";
+        }
+        return photos == 0
+                ? "対象の周りをゆっくり動かしてください。"
+                : "別の角度からもゆっくり撮影してください。";
+    }
+
+    private void showState(String title, String message) {
+        String signature = "state|" + title + "|" + message;
+        if (signature.equals(lastUiSignature)) {
+            return;
+        }
+        lastUiSignature = signature;
+        lastStatus = title + " / " + message;
+        int count = datasetCaptureManager == null ? 0 : datasetCaptureManager.getSavedCount();
+        runOnUiThread(() -> {
+            statusTitleView.setText(title);
+            statusView.setText(message);
+            captureCountView.setText(captureFinalized
+                    ? "保存した写真 " + count + "枚"
+                    : "保存できた写真 " + count + "枚");
+            progressBar.setVisibility(View.GONE);
+        });
+    }
+
+    private void showOperation(String title, String message, int percent) {
+        String signature = "op|" + title + "|" + message + "|" + percent;
+        if (signature.equals(lastUiSignature)) {
+            return;
+        }
+        lastUiSignature = signature;
+        lastStatus = title + " / " + message + " / " + percent;
+        int count = datasetCaptureManager == null ? 0 : datasetCaptureManager.getSavedCount();
+        runOnUiThread(() -> {
+            statusTitleView.setText(title);
+            statusView.setText(message);
+            captureCountView.setText((captureFinalized ? "保存した写真 " : "保存できた写真 ")
+                    + count + "枚");
+            progressBar.setVisibility(View.VISIBLE);
+            if (percent < 0) {
+                progressBar.setIndeterminate(true);
+            } else {
+                progressBar.setIndeterminate(false);
+                progressBar.setProgress(Math.max(0, Math.min(100, percent)));
+            }
+        });
+    }
+
+    private void showFeedback(String message) {
+        if (uiHandler == null || feedbackView == null) {
+            return;
+        }
+        runOnUiThread(() -> {
+            if (hideFeedbackRunnable != null) {
+                uiHandler.removeCallbacks(hideFeedbackRunnable);
+            }
+            feedbackView.setText(message);
+            feedbackView.setVisibility(View.VISIBLE);
+            hideFeedbackRunnable = () -> feedbackView.setVisibility(View.GONE);
+            uiHandler.postDelayed(hideFeedbackRunnable, 2800L);
+        });
     }
 
     private void updateDisplayGeometryIfNeeded() {
@@ -1273,14 +1537,6 @@ public final class ScannerActivity extends Activity
             displayManager.unregisterDisplayListener(this);
             displayListenerRegistered = false;
         }
-    }
-
-    private void setStatus(String text) {
-        if (text.equals(lastStatus)) {
-            return;
-        }
-        lastStatus = text;
-        runOnUiThread(() -> statusView.setText(text));
     }
 
     private int dp(int value) {
