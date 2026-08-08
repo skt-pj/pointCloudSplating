@@ -20,13 +20,11 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Android-only depth-prior Gaussian generator.
+ * Android-only depth-prior Gaussian initializer.
  *
- * <p>This is intentionally small enough to run on a phone without PyTorch/CUDA. It fuses the
- * synchronized ARCore Raw Depth point clouds into a bounded voxel set and serializes the result as
- * a standard 3DGS PLY with SH0 color, opacity, isotropic scale and identity rotation. It provides a
- * real splat model that can be opened by standard 3DGS viewers, while leaving future photometric
- * gradient optimization to a Vulkan backend.</p>
+ * <p>This fuses synchronized ARCore Raw Depth point clouds into a bounded voxel set and serializes
+ * an initialization PLY with SH0 seed color, opacity, isotropic scale and identity rotation. This
+ * artifact is geometry initialization only; it is never considered completed 3DGS.</p>
  */
 public final class GaussianSplatTrainer {
     private static final String TAG = "GaussianSplatTrainer";
@@ -64,7 +62,7 @@ public final class GaussianSplatTrainer {
 
         static Result ok(File outputFile, int gaussianCount) {
             return new Result(true,
-                    "generated " + gaussianCount + " Gaussians", gaussianCount, outputFile);
+                    "initialized " + gaussianCount + " depth-prior Gaussians", gaussianCount, outputFile);
         }
 
         static Result fail(String message) {
@@ -118,26 +116,27 @@ public final class GaussianSplatTrainer {
                 return Result.fail("no confident Raw Depth points available");
             }
 
-            notifyProgress(listener, 75, "3D Gaussianを生成しています...");
+            notifyProgress(listener, 75, "Depth prior Gaussianを初期化しています...");
             List<Gaussian> gaussians = buildGaussians(voxels);
             if (gaussians.isEmpty()) {
-                return Result.fail("Gaussian generation produced no points");
+                return Result.fail("Depth prior initialization produced no points");
             }
 
+            // Temporary name only. GaussianSplatJob immediately moves this to depth_prior.ply.
             File output = new File(datasetDirectory, "splat.ply");
             writeGaussianPly(output, gaussians);
             writeResultJson(datasetDirectory, files.length, totalPoints, acceptedPoints,
                     sampleStride, gaussians.size(), output.getName());
-            notifyProgress(listener, 100, "3DGS生成完了");
+            notifyProgress(listener, 100, "Depth prior初期化完了");
             DiagnosticLog.i(TAG,
-                    "Generated splat.ply gaussians=" + gaussians.size()
+                    "Initialized temporary depth-prior splat.ply gaussians=" + gaussians.size()
                             + " depthFrames=" + files.length
                             + " sampledPoints=" + acceptedPoints
                             + " stride=" + sampleStride);
             return Result.ok(output, gaussians.size());
         } catch (IOException | RuntimeException e) {
-            DiagnosticLog.e(TAG, "3DGS generation failed", e);
-            return Result.fail("3DGS generation failed: " + e.getClass().getSimpleName());
+            DiagnosticLog.e(TAG, "Depth prior initialization failed", e);
+            return Result.fail("Depth prior initialization failed: " + e.getClass().getSimpleName());
         }
     }
 
@@ -232,8 +231,8 @@ public final class GaussianSplatTrainer {
         StringBuilder header = new StringBuilder();
         header.append("ply\n")
                 .append("format binary_little_endian 1.0\n")
-                .append("comment pointCloudSplating Android depth-prior 3DGS\n")
-                .append("comment SH degree 3 layout with SH0 color and zero higher-order terms\n")
+                .append("comment pointCloudSplating Android depth-prior initializer\n")
+                .append("comment geometry initialization only; not completed 3DGS\n")
                 .append("element vertex ").append(gaussians.size()).append('\n')
                 .append("property float x\n")
                 .append("property float y\n")
@@ -307,9 +306,9 @@ public final class GaussianSplatTrainer {
             String outputName) throws IOException {
         String json = String.format(Locale.US,
                 "{\n"
-                        + "  \"format_version\": 1,\n"
-                        + "  \"status\": \"COMPLETE\",\n"
-                        + "  \"backend\": \"android_depth_prior_gaussian_v1\",\n"
+                        + "  \"format_version\": 2,\n"
+                        + "  \"status\": \"DEPTH_PRIOR_TEMP\",\n"
+                        + "  \"backend\": \"android_depth_prior_initializer_v2\",\n"
                         + "  \"output\": \"%s\",\n"
                         + "  \"depth_frame_count\": %d,\n"
                         + "  \"raw_point_count\": %d,\n"
@@ -317,9 +316,10 @@ public final class GaussianSplatTrainer {
                         + "  \"sample_stride\": %d,\n"
                         + "  \"gaussian_count\": %d,\n"
                         + "  \"voxel_size_m\": %.6f,\n"
-                        + "  \"sh_degree\": 3,\n"
+                        + "  \"sh_degree\": 0,\n"
                         + "  \"photometric_optimization\": false,\n"
-                        + "  \"note\": \"Depth-prior fusion generates a standard 3DGS-compatible PLY on-device. Vulkan photometric optimization can replace this backend later without changing the dataset format.\"\n"
+                        + "  \"final_3dgs\": false,\n"
+                        + "  \"note\": \"Temporary Raw Depth geometry initialization only; GaussianSplatJob moves this to depth_prior.ply.\"\n"
                         + "}\n",
                 outputName,
                 depthFrameCount,
