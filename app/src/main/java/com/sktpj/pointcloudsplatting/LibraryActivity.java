@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.view.Gravity;
@@ -14,6 +15,7 @@ import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -24,7 +26,9 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -37,6 +41,9 @@ import java.util.Locale;
 
 /** Thumbnail library for saved reconstruction datasets and their real training state. */
 public final class LibraryActivity extends Activity {
+    private static final String TAG = "PointCloudLibrary";
+    private static final int REQUEST_SAVE_LOG = 1201;
+    private static final int MENU_SAVE_LOG = 1;
     private static final int CARD_THUMBNAIL_HEIGHT_DP = 150;
     private static final String FINAL_SPLAT = "splat.ply";
     private static final String PREVIEW_SPLAT = "preview_splat.ply";
@@ -45,6 +52,7 @@ public final class LibraryActivity extends Activity {
     private GridLayout grid;
     private TextView emptyView;
     private volatile boolean generationInProgress;
+    private volatile String pendingDiagnosticReport;
 
     @Override protected void onCreate(Bundle savedInstanceState){super.onCreate(savedInstanceState);setContentView(buildContentView());}
     @Override protected void onResume(){super.onResume();reloadLibrary();}
@@ -53,20 +61,31 @@ public final class LibraryActivity extends Activity {
         LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(0xFF101010);
         LinearLayout header=new LinearLayout(this);header.setOrientation(LinearLayout.HORIZONTAL);header.setGravity(Gravity.CENTER_VERTICAL);header.setPadding(dp(12),dp(8),dp(12),dp(8));header.setBackgroundColor(0xFF202020);
         Button back=new Button(this);back.setText("戻る");back.setAllCaps(false);back.setContentDescription("撮影画面に戻る");back.setMinHeight(dp(48));back.setOnClickListener(v->finish());header.addView(back,new LinearLayout.LayoutParams(dp(84),dp(52)));
-        TextView title=new TextView(this);title.setText("保存したスキャン");title.setTextColor(0xFFFFFFFF);title.setTextSize(20f);title.setGravity(Gravity.CENTER);header.addView(title,new LinearLayout.LayoutParams(0,dp(52),1f));
-        Button reload=new Button(this);reload.setText("更新");reload.setAllCaps(false);reload.setContentDescription("保存したスキャンの一覧を更新する");reload.setMinHeight(dp(48));reload.setOnClickListener(v->reloadLibrary());header.addView(reload,new LinearLayout.LayoutParams(dp(84),dp(52)));root.addView(header);
+        TextView title=new TextView(this);title.setText("ライブラリ");title.setTextColor(0xFFFFFFFF);title.setTextSize(20f);title.setGravity(Gravity.CENTER);header.addView(title,new LinearLayout.LayoutParams(0,dp(52),1f));
+        Button reload=new Button(this);reload.setText("更新");reload.setAllCaps(false);reload.setContentDescription("ライブラリの一覧を更新する");reload.setMinHeight(dp(48));reload.setOnClickListener(v->reloadLibrary());header.addView(reload,new LinearLayout.LayoutParams(dp(84),dp(52)));
+        Button menu=new Button(this);menu.setText("⋮");menu.setTextSize(24f);menu.setAllCaps(false);menu.setContentDescription("ライブラリメニュー");menu.setMinWidth(0);menu.setMinHeight(dp(48));menu.setPadding(0,0,0,0);menu.setOnClickListener(v->showLibraryMenu(menu));header.addView(menu,new LinearLayout.LayoutParams(dp(52),dp(52)));root.addView(header);
         FrameLayout content=new FrameLayout(this);root.addView(content,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,0,1f));
         ScrollView scroll=new ScrollView(this);grid=new GridLayout(this);grid.setColumnCount(2);grid.setUseDefaultMargins(false);grid.setPadding(dp(6),dp(6),dp(6),dp(24));scroll.addView(grid,new ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT,ScrollView.LayoutParams.WRAP_CONTENT));content.addView(scroll,new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,FrameLayout.LayoutParams.MATCH_PARENT));
-        emptyView=new TextView(this);emptyView.setText("保存したスキャンはまだありません\n\n撮影画面で対象の周りを撮影し、\n「撮影を保存」を押してください。");emptyView.setTextColor(0xFFCCCCCC);emptyView.setTextSize(17f);emptyView.setGravity(Gravity.CENTER);emptyView.setPadding(dp(24),dp(24),dp(24),dp(24));content.addView(emptyView,new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,FrameLayout.LayoutParams.MATCH_PARENT));
+        emptyView=new TextView(this);emptyView.setText("ライブラリにはまだ撮影がありません\n\n撮影画面で対象の周りを撮影し、\n「撮影を保存」を押してください。");emptyView.setTextColor(0xFFCCCCCC);emptyView.setTextSize(17f);emptyView.setGravity(Gravity.CENTER);emptyView.setPadding(dp(24),dp(24),dp(24),dp(24));content.addView(emptyView,new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,FrameLayout.LayoutParams.MATCH_PARENT));
         root.setOnApplyWindowInsetsListener((view,insets)->{int top=insets.getSystemWindowInsetTop(),bottom=insets.getSystemWindowInsetBottom(),left=insets.getSystemWindowInsetLeft(),right=insets.getSystemWindowInsetRight();if(android.os.Build.VERSION.SDK_INT>=28&&insets.getDisplayCutout()!=null){android.view.DisplayCutout c=insets.getDisplayCutout();top=Math.max(top,c.getSafeInsetTop());bottom=Math.max(bottom,c.getSafeInsetBottom());left=Math.max(left,c.getSafeInsetLeft());right=Math.max(right,c.getSafeInsetRight());}root.setPadding(left,top+dp(12),right,bottom+dp(8));return insets;});root.post(root::requestApplyInsets);return root;
     }
+
+    private void showLibraryMenu(View anchor){PopupMenu popup=new PopupMenu(this,anchor);popup.getMenu().add(0,MENU_SAVE_LOG,0,"ログを保存");popup.setOnMenuItemClickListener(item->{if(item.getItemId()==MENU_SAVE_LOG){saveDiagnosticLog();return true;}return false;});popup.show();}
+
+    private void saveDiagnosticLog(){Toast.makeText(this,"ログを準備しています…",Toast.LENGTH_SHORT).show();new Thread(()->{String report=buildDiagnosticReport();runOnUiThread(()->{pendingDiagnosticReport=report;Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("text/plain");intent.putExtra(Intent.EXTRA_TITLE,"pointCloudSplating-diagnostics-"+new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(new Date())+".txt");startActivityForResult(intent,REQUEST_SAVE_LOG);});},"PrepareLibraryDiagnostics").start();}
+
+    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(requestCode!=REQUEST_SAVE_LOG)return;if(resultCode!=RESULT_OK||data==null||data.getData()==null){pendingDiagnosticReport=null;return;}Uri uri=data.getData();String report=pendingDiagnosticReport;pendingDiagnosticReport=null;new Thread(()->{try(OutputStream out=getContentResolver().openOutputStream(uri,"w")){if(out==null)throw new IOException("output stream unavailable");out.write((report==null?"":report).getBytes(StandardCharsets.UTF_8));out.flush();runOnUiThread(()->Toast.makeText(this,"ログを保存しました",Toast.LENGTH_SHORT).show());}catch(IOException|RuntimeException e){DiagnosticLog.e(TAG,"Failed to save diagnostics",e);runOnUiThread(()->Toast.makeText(this,"ログを保存できませんでした",Toast.LENGTH_LONG).show());}},"SaveLibraryDiagnostics").start();}
+
+    private String buildDiagnosticReport(){return new StringBuilder().append("pointCloudSplating diagnostics\n").append("version=").append(BuildConfig.VERSION_NAME).append('\n').append("manufacturer=").append(android.os.Build.MANUFACTURER).append('\n').append("model=").append(android.os.Build.MODEL).append('\n').append("device=").append(android.os.Build.DEVICE).append('\n').append("sdk=").append(android.os.Build.VERSION.SDK_INT).append('\n').append("screen=library\n\n").append("=== in-app log ===\n").append(DiagnosticLog.snapshot()).append("\n=== process logcat ===\n").append(readOwnLogcat()).toString();}
+
+    private static String readOwnLogcat(){StringBuilder out=new StringBuilder();java.lang.Process process=null;try{process=Runtime.getRuntime().exec(new String[]{"logcat","-d","-v","threadtime","--pid="+android.os.Process.myPid()});try(BufferedReader reader=new BufferedReader(new InputStreamReader(process.getInputStream()))){String line;while((line=reader.readLine())!=null){out.append(line).append('\n');if(out.length()>200_000){out.append("[logcat truncated]\n");break;}}}}catch(IOException|RuntimeException e){out.append("logcat unavailable: ").append(e).append('\n');}finally{if(process!=null)process.destroy();}return out.toString();}
 
     private void reloadLibrary(){File pictures=getExternalFilesDir(Environment.DIRECTORY_PICTURES);List<File>datasets=findSavedDatasets(pictures);grid.removeAllViews();emptyView.setVisibility(datasets.isEmpty()?View.VISIBLE:View.GONE);for(File dataset:datasets){migrateLegacyArtifacts(dataset);grid.addView(createDatasetCard(dataset));}}
 
     private View createDatasetCard(File dataset){
         LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setPadding(dp(8),dp(8),dp(8),dp(10));card.setMinimumHeight(dp(220));GradientDrawable bg=new GradientDrawable();bg.setColor(0xFF282828);bg.setCornerRadius(dp(12));card.setBackground(bg);
         GridLayout.LayoutParams params=new GridLayout.LayoutParams();params.width=0;params.height=GridLayout.LayoutParams.WRAP_CONTENT;params.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);params.setMargins(dp(5),dp(5),dp(5),dp(5));card.setLayoutParams(params);
-        ImageView thumbnail=new ImageView(this);thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);thumbnail.setBackgroundColor(0xFF151515);thumbnail.setContentDescription("保存したスキャンの写真");Bitmap bitmap=decodeThumbnail(findFirstJpeg(dataset),480,360);if(bitmap!=null)thumbnail.setImageBitmap(bitmap);card.addView(thumbnail,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(CARD_THUMBNAIL_HEIGHT_DP)));
+        ImageView thumbnail=new ImageView(this);thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);thumbnail.setBackgroundColor(0xFF151515);thumbnail.setContentDescription("ライブラリの撮影写真");Bitmap bitmap=decodeThumbnail(findFirstJpeg(dataset),480,360);if(bitmap!=null)thumbnail.setImageBitmap(bitmap);card.addView(thumbnail,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(CARD_THUMBNAIL_HEIGHT_DP)));
         TextView name=new TextView(this);name.setText(formatDatasetName(dataset.getName()));name.setTextColor(0xFFFFFFFF);name.setTextSize(15f);name.setMaxLines(1);name.setPadding(dp(4),dp(8),dp(4),0);card.addView(name);
         TextView status=new TextView(this);status.setText(buildDatasetStatus(dataset));status.setTextColor(0xFFDDDDDD);status.setTextSize(14f);status.setPadding(dp(4),dp(4),dp(4),dp(4));card.addView(status);
         card.setContentDescription(formatDatasetName(dataset.getName())+"。"+buildDatasetStatus(dataset).replace('\n',' ')+"。タップして3Dモデルを開く、または作成する。");card.setClickable(true);card.setFocusable(true);card.setOnClickListener(v->openOrTrain(dataset,status));return card;
