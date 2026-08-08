@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
 import android.hardware.camera2.CameraAccessException;
@@ -71,6 +72,7 @@ public final class ScannerActivity extends Activity
     private static final int CAMERA_PERMISSION_REQUEST = 1001;
     private static final int MENU_COPY_LOG = 1;
     private static final int MENU_COPY_DATASET_PATH = 2;
+    private static final int MENU_LIBRARY = 3;
     private static final String HIGH_RES_CAPTURE_TAG = "dataset_texture_still";
 
     private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L; // 1/500 s
@@ -361,6 +363,7 @@ public final class ScannerActivity extends Activity
         PopupMenu popup = new PopupMenu(this, menuButton);
         popup.getMenu().add(0, MENU_COPY_LOG, 0, "ログをコピー");
         popup.getMenu().add(0, MENU_COPY_DATASET_PATH, 1, "保存先をコピー");
+        popup.getMenu().add(0, MENU_LIBRARY, 2, "ライブラリ");
         popup.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == MENU_COPY_LOG) {
                 copyLogsToClipboard();
@@ -370,6 +373,10 @@ public final class ScannerActivity extends Activity
                 String path = getCurrentDatasetPath();
                 copyText("pointCloudSplating dataset", path);
                 Toast.makeText(this, "保存先をコピーしました", Toast.LENGTH_SHORT).show();
+                return true;
+            }
+            if (item.getItemId() == MENU_LIBRARY) {
+                startActivity(new Intent(this, LibraryActivity.class));
                 return true;
             }
             return false;
