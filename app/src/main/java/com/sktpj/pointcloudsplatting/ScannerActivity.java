@@ -130,6 +130,8 @@ public final class ScannerActivity extends Activity
     private boolean installRequested;
     private boolean activityResumed;
     private boolean surfaceCreated;
+    private boolean surfaceViewResumed;
+    private volatile boolean frameFailureLatched;
     private boolean cameraOpening;
     private volatile boolean arcoreActive;
     private boolean displayListenerRegistered;
@@ -217,7 +219,7 @@ public final class ScannerActivity extends Activity
                 @Override
                 public void onActive(CameraCaptureSession activeSession) {
                     DiagnosticLog.i(TAG, "Camera capture session active");
-                    if (activityResumed && !arcoreActive) resumeArCore();
+                    if (activityResumed && !captureFinalized && !arcoreActive) resumeArCore();
                 }
 
                 @Override
@@ -757,17 +759,30 @@ public final class ScannerActivity extends Activity
         DiagnosticLog.i(TAG, "onResume");
         activityResumed = true;
 
+        // A finalized scan never needs the capture stack again. In particular, after the
+        // processing Activity finishes, do not recreate Camera2/ARCore/GL just to show the
+        // result/error UI. This keeps those resources free for the trainer and avoids a stale
+        // ARCore camera texture after the intentionally destroyed EGL context.
+        if (captureFinalized) {
+            DiagnosticLog.i(TAG, "Capture finalized; keeping camera/AR/GL suspended on resume");
+            return;
+        }
+
         if (!hasCameraPermission()) {
             requestPermissions(new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
             return;
         }
         if (session == null && !createSharedArSession()) return;
 
+        // setPreserveEGLContextOnPause(false) means the old texture name is invalid after pause.
+        // Force the camera-open path to wait for onSurfaceCreated(), which creates and binds the
+        // replacement external OES texture before openCameraForSharing() calls setCameraTextureName().
+        surfaceCreated = false;
         surfaceView.onResume();
+        surfaceViewResumed = true;
         registerDisplayListener();
         displayGeometryChanged = true;
-        if (surfaceCreated) openCameraForSharing();
-        if (!captureFinalized && !processingModel) showState("準備中", "カメラを準備しています…");
+        showState("準備中", "カメラを準備しています…");
     }
 
     private boolean createSharedArSession() {
@@ -904,10 +919,12 @@ public final class ScannerActivity extends Activity
     }
 
     private void resumeArCore() {
-        if (session == null || sharedCamera == null || arcoreActive || !activityResumed) return;
+        if (session == null || sharedCamera == null || arcoreActive || !activityResumed
+                || captureFinalized || !surfaceCreated) return;
         try {
             session.resume();
             if (datasetCaptureManager != null) datasetCaptureManager.onCameraResumed();
+            frameFailureLatched = false;
             arcoreActive = true;
             sharedCamera.setCaptureCallback(cameraCaptureCallback, cameraHandler);
             DiagnosticLog.i(TAG, "ARCore resumed with SharedCamera");
@@ -1042,7 +1059,13 @@ public final class ScannerActivity extends Activity
         DiagnosticLog.i(TAG, "onPause");
         activityResumed = false;
         unregisterDisplayListener();
-        surfaceView.onPause();
+        // The EGL context is not preserved. Clear this before pausing so onResume cannot open
+        // SharedCamera against the texture id from the destroyed context.
+        surfaceCreated = false;
+        if (surfaceViewResumed) {
+            surfaceView.onPause();
+            surfaceViewResumed = false;
+        }
         synchronized (frameInUseLock) {
             if (session != null && arcoreActive) {
                 session.pause();
@@ -1118,7 +1141,7 @@ public final class ScannerActivity extends Activity
     @Override
     public void onDrawFrame(GL10 gl) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
-        if (session == null || !arcoreActive) return;
+        if (session == null || !arcoreActive || frameFailureLatched) return;
 
         synchronized (frameInUseLock) {
             try {
@@ -1174,7 +1197,10 @@ public final class ScannerActivity extends Activity
                 String decision = datasetCaptureManager == null ? "dataset unavailable" : datasetCaptureManager.getLastDecision();
                 updateCaptureUi(photos, decision);
             } catch (Throwable t) {
-                DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed", t);
+                // Latch the first fatal frame failure instead of calling Session.update() again
+                // every render frame. onPause still sees arcoreActive=true and pauses the session.
+                frameFailureLatched = true;
+                DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed; frame loop latched", t);
                 showState("撮影を続けられませんでした",
                         "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
             }

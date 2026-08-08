@@ -67,6 +67,7 @@ public final class DatasetCaptureManager {
 
     private static final int MAX_POSE_SAMPLES = 180;
     private static final int MAX_DEPTH_SAMPLES = 32;
+    private static final int MAX_FALLBACK_DEPTH_PRIORS = 6;
 
     private final File captureRoot;
     private final ExecutorService writer = Executors.newSingleThreadExecutor();
@@ -82,6 +83,7 @@ public final class DatasetCaptureManager {
     private long lastRequestedTimestampNs = -1L;
     private boolean captureInFlight;
     private boolean cameraActive = true;
+    private boolean fallbackDepthPriorsQueued;
     private volatile boolean captureEnabled = true;
     private volatile int savedCount;
     private volatile String lastDecision = "waiting for first stable view";
@@ -320,6 +322,7 @@ public final class DatasetCaptureManager {
         synchronized (this) {
             captureEnabled = false;
             lastDecision = "capture stopped; finalizing";
+            queueFallbackDepthPriorsLocked();
         }
 
         while (true) {
@@ -364,6 +367,46 @@ public final class DatasetCaptureManager {
     public synchronized void resumeCapture() {
         captureEnabled = true;
         lastDecision = "capture resumed";
+    }
+
+    /**
+     * Saves a small set of root-anchor Raw Depth snapshots for 3DGS initialization. These are
+     * intentionally independent of JPEG timestamp matching: a root-local geometry prior does not
+     * need to be the same instant as a photometric observation. Per-frame PLY remains synchronized
+     * when available; these files only prevent valid rolling depth from being discarded at Save.
+     */
+    private void queueFallbackDepthPriorsLocked() {
+        if (fallbackDepthPriorsQueued || depthSamples.isEmpty()) return;
+
+        List<WorldPointCloudSnapshot> available = new ArrayList<>(depthSamples);
+        int wanted = Math.min(MAX_FALLBACK_DEPTH_PRIORS, available.size());
+        int queued = 0;
+        for (int i = 0; i < wanted; i++) {
+            int sourceIndex = wanted == 1
+                    ? available.size() - 1
+                    : Math.round(i * (available.size() - 1f) / (wanted - 1f));
+            WorldPointCloudSnapshot snapshot = available.get(sourceIndex);
+            if (snapshot == null || snapshot.getPointCount() < 64) continue;
+            File output = new File(captureRoot, String.format(Locale.US,
+                    "depth_prior_%02d_%d.ply", queued + 1, snapshot.getTimestampNs()));
+            writer.execute(() -> {
+                try {
+                    snapshot.writePly(output);
+                    DiagnosticLog.i(TAG,
+                            "Saved fallback depth prior=" + output.getName()
+                                    + " points=" + snapshot.getPointCount());
+                } catch (IOException e) {
+                    DiagnosticLog.w(TAG,
+                            "Failed to save fallback depth prior " + output.getName()
+                                    + ": " + e.getMessage());
+                }
+            });
+            queued++;
+        }
+        fallbackDepthPriorsQueued = queued > 0;
+        DiagnosticLog.i(TAG,
+                "Queued fallback depth priors=" + queued
+                        + " rollingDepthSnapshots=" + available.size());
     }
 
     public void shutdown() {

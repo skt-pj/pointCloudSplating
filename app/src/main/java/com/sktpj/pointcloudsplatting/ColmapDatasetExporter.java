@@ -131,9 +131,11 @@ public final class ColmapDatasetExporter {
 
             notifyProgress(listener, 39, "3Dの初期位置をまとめています…");
             File[] depthFiles = dataset.listFiles((dir, name) ->
-                    name.startsWith("frame_") && name.endsWith(".ply"));
+                    name.endsWith(".ply")
+                            && (name.startsWith("frame_") || name.startsWith("depth_prior_")));
             if (depthFiles == null) depthFiles = new File[0];
             Arrays.sort(depthFiles, Comparator.comparing(File::getName));
+            DiagnosticLog.i(TAG, "Depth prior source files=" + depthFiles.length);
 
             Map<Long, PointAccumulator> points = collectDepthPoints(depthFiles, 0.05f);
             if (points.size() < 256) {
