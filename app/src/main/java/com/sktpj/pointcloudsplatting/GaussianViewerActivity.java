@@ -16,14 +16,7 @@ import android.widget.Toast;
 
 import java.io.File;
 
-/**
- * OpenGL ES 3 viewer for splat.ply.
- *
- * <p>The viewer renders the actual anisotropic Gaussian parameters: 3D scale, quaternion rotation,
- * opacity and SH1 appearance. Gaussians are sorted back-to-front whenever the view direction
- * changes and alpha composited without depth writes. The vertex shader projects the full 3D
- * covariance into screen space and draws a 3-sigma ellipse rather than an isotropic point sprite.
- */
+/** OpenGL ES 3 viewer for final splat.ply or the explicitly non-final preview_splat.ply. */
 public final class GaussianViewerActivity extends Activity {
     public static final String EXTRA_DATASET_PATH = "dataset_path";
 
@@ -40,21 +33,27 @@ public final class GaussianViewerActivity extends Activity {
         super.onCreate(savedInstanceState);
         String datasetPath = getIntent().getStringExtra(EXTRA_DATASET_PATH);
         if (datasetPath == null) {
-            Toast.makeText(this, "3Dモデルを開けませんでした。", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "3Dデータを開けませんでした。", Toast.LENGTH_LONG).show();
             finish();
             return;
         }
-        File splat = new File(new File(datasetPath), "splat.ply");
-        if (!splat.isFile()) {
-            Toast.makeText(this, "3Dモデルを開けませんでした。", Toast.LENGTH_LONG).show();
+        File dataset = new File(datasetPath);
+        File modelFile = new File(dataset, "splat.ply");
+        boolean preview = false;
+        if (!modelFile.isFile()) {
+            modelFile = new File(dataset, "preview_splat.ply");
+            preview = true;
+        }
+        if (!modelFile.isFile()) {
+            Toast.makeText(this, "表示できる3Dデータがありません。", Toast.LENGTH_LONG).show();
             finish();
             return;
         }
+        final File selectedModel = modelFile;
+        final boolean previewModel = preview;
 
         renderer = new GaussianEs3Renderer(message -> runOnUiThread(() -> {
-            if (statusView != null) {
-                statusView.setText(message);
-            }
+            if (statusView != null) statusView.setText(message);
         }));
 
         glView = new GLSurfaceView(this);
@@ -66,20 +65,18 @@ public final class GaussianViewerActivity extends Activity {
 
         scaleDetector = new ScaleGestureDetector(this,
                 new ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                    @Override
-                    public boolean onScale(ScaleGestureDetector detector) {
+                    @Override public boolean onScale(ScaleGestureDetector detector) {
                         renderer.zoom(detector.getScaleFactor());
                         return true;
                     }
                 });
         glView.setOnTouchListener(this::handleTouch);
-        glView.setContentDescription("3Dモデル表示。指一本で回転、二本指で拡大縮小できます");
+        glView.setContentDescription("3D表示。指一本で回転、二本指で拡大縮小できます");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF101010);
         root.addView(glView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
@@ -91,15 +88,13 @@ public final class GaussianViewerActivity extends Activity {
         statusView.setTextColor(0xFFFFFFFF);
         statusView.setTextSize(13f);
         statusView.setGravity(Gravity.CENTER);
-        statusView.setText("3Dモデルを読み込んでいます…\n少しお待ちください");
-        top.addView(statusView, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        statusView.setText(previewModel
+                ? "3Dプレビューを読み込んでいます…\n少しお待ちください"
+                : "3Dモデルを読み込んでいます…\n少しお待ちください");
+        top.addView(statusView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
-        top.addView(makeButton(
-                "正面に戻す",
-                "3Dモデルの向きと大きさを元に戻す",
-                v -> renderer.resetCamera(),
-                128));
+        top.addView(makeButton("正面に戻す", "3D表示の向きと大きさを元に戻す",
+                v -> renderer.resetCamera(), 128));
 
         FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, dp(64));
@@ -126,24 +121,16 @@ public final class GaussianViewerActivity extends Activity {
         sizeSlider.setMax(100);
         sizeSlider.setProgress(0);
         sizeSlider.setMinHeight(dp(48));
-        sizeSlider.setContentDescription("3Dモデルの表示サイズ");
+        sizeSlider.setContentDescription("3D表示の粒の大きさ");
         sizeSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 renderer.setDisplaySizeProgress(progress);
-                if (progress == 0) {
-                    sizeLabel.setText("表示サイズ: 最小");
-                } else if (progress < 55) {
-                    sizeLabel.setText("表示サイズ: 小さめ " + progress + "%");
-                } else if (progress < 80) {
-                    sizeLabel.setText("表示サイズ: 標準 " + progress + "%");
-                } else if (progress == 100) {
-                    sizeLabel.setText("表示サイズ: 最大");
-                } else {
-                    sizeLabel.setText("表示サイズ: 大きめ " + progress + "%");
-                }
+                if (progress == 0) sizeLabel.setText("表示サイズ: 最小");
+                else if (progress < 55) sizeLabel.setText("表示サイズ: 小さめ " + progress + "%");
+                else if (progress < 80) sizeLabel.setText("表示サイズ: 標準 " + progress + "%");
+                else if (progress == 100) sizeLabel.setText("表示サイズ: 最大");
+                else sizeLabel.setText("表示サイズ: 大きめ " + progress + "%");
             }
-
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
@@ -159,79 +146,44 @@ public final class GaussianViewerActivity extends Activity {
         root.addView(sizePanel, sizeParams);
 
         setContentView(root);
-        loadModelAsync(splat);
+        loadModelAsync(selectedModel, previewModel);
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        if (glView != null) {
-            glView.onResume();
-        }
+    @Override protected void onResume(){super.onResume();if(glView!=null)glView.onResume();}
+    @Override protected void onPause(){if(glView!=null)glView.onPause();super.onPause();}
+
+    private Button makeButton(String text,String description,View.OnClickListener listener,int widthDp){
+        Button button=new Button(this);button.setText(text);button.setAllCaps(false);button.setContentDescription(description);button.setMinHeight(dp(48));button.setOnClickListener(listener);button.setLayoutParams(new LinearLayout.LayoutParams(dp(widthDp),LinearLayout.LayoutParams.MATCH_PARENT));return button;
     }
 
-    @Override
-    protected void onPause() {
-        if (glView != null) {
-            glView.onPause();
-        }
-        super.onPause();
-    }
-
-    private Button makeButton(
-            String text,
-            String description,
-            View.OnClickListener listener,
-            int widthDp) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setAllCaps(false);
-        button.setContentDescription(description);
-        button.setMinHeight(dp(48));
-        button.setOnClickListener(listener);
-        button.setLayoutParams(new LinearLayout.LayoutParams(
-                dp(widthDp), LinearLayout.LayoutParams.MATCH_PARENT));
-        return button;
-    }
-
-    private void loadModelAsync(File splat) {
+    private void loadModelAsync(File modelFile, boolean preview) {
         new Thread(() -> {
             try {
-                GaussianModel model = GaussianPlyModelReader.read(splat);
+                GaussianModel model = GaussianPlyModelReader.read(modelFile);
                 renderer.setModel(model);
-                runOnUiThread(() -> statusView.setText(
-                        "3Dモデルを画面に準備しています…\n少しお待ちください"));
+                DiagnosticLog.i("GaussianViewer", "Model artifact=" + modelFile.getName()
+                        + " final3dgs=" + (!preview));
+                runOnUiThread(() -> statusView.setText(preview
+                        ? "3Dプレビューを画面に準備しています…\n少しお待ちください"
+                        : "3Dモデルを画面に準備しています…\n少しお待ちください"));
             } catch (Exception e) {
-                DiagnosticLog.e("GaussianViewer", "Failed to load splat.ply", e);
+                DiagnosticLog.e("GaussianViewer", "Failed to load " + modelFile.getName(), e);
                 runOnUiThread(() -> {
-                    statusView.setText("3Dモデルを表示できませんでした");
-                    Toast.makeText(
-                            this,
-                            "3Dモデルを表示できませんでした。",
-                            Toast.LENGTH_LONG).show();
+                    statusView.setText("3D表示を開けませんでした");
+                    Toast.makeText(this, "3D表示を開けませんでした。", Toast.LENGTH_LONG).show();
                 });
             }
         }, "LoadGaussianPly").start();
     }
 
-    private boolean handleTouch(View view, MotionEvent event) {
+    private boolean handleTouch(View view,MotionEvent event){
         scaleDetector.onTouchEvent(event);
-        if (event.getPointerCount() == 1 && !scaleDetector.isInProgress()) {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                lastX = event.getX();
-                lastY = event.getY();
-            } else if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
-                float x = event.getX();
-                float y = event.getY();
-                renderer.rotate((x - lastX) * 0.35f, (y - lastY) * 0.35f);
-                lastX = x;
-                lastY = y;
-            }
+        if(event.getPointerCount()==1&&!scaleDetector.isInProgress()){
+            if(event.getActionMasked()==MotionEvent.ACTION_DOWN){lastX=event.getX();lastY=event.getY();}
+            else if(event.getActionMasked()==MotionEvent.ACTION_MOVE){float x=event.getX(),y=event.getY();renderer.rotate((x-lastX)*0.35f,(y-lastY)*0.35f);lastX=x;lastY=y;}
         }
         return true;
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
+    private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
 }
