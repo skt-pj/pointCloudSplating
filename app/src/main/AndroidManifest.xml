@@ -12,7 +12,7 @@
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:label="pointCloudSplating"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar.Fullscreen">
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
         <activity
