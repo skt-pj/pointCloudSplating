@@ -13,10 +13,9 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Validates a saved RGB/Pose/Depth dataset and prepares only the geometry prior.
- *
- * <p>Important: a depth-derived Gaussian PLY is NOT considered completed 3DGS. Completed 3DGS
- * requires photometric optimization against the saved high-resolution JPEG observations.</p>
+ * Validates a saved RGB/Pose/Depth dataset, prepares geometry, and runs the phone-side high-quality
+ * multi-view RGB refinement. Full final 3DGS remains reserved for the future Vulkan rasterized
+ * L1+SSIM backward optimizer.
  */
 public final class GaussianSplatJob {
     private static final String TAG = "GaussianSplatJob";
@@ -25,10 +24,12 @@ public final class GaussianSplatJob {
     private GaussianSplatJob() {}
 
     public static final class Result {
-        /** True only when real RGB photometric 3DGS optimization has completed. */
+        /** True only when full rasterized RGB photometric 3DGS optimization has completed. */
         public final boolean success;
-        /** True when a depth-derived Gaussian initialization artifact is ready. */
+        /** True when the depth-derived geometry prior exists. */
         public final boolean priorReady;
+        /** True when high-resolution JPEG/Pose/intrinsics multi-view refinement exists. */
+        public final boolean hqReady;
         public final String message;
         public final int frameCount;
         public final int gaussianCount;
@@ -37,12 +38,14 @@ public final class GaussianSplatJob {
         private Result(
                 boolean success,
                 boolean priorReady,
+                boolean hqReady,
                 String message,
                 int frameCount,
                 int gaussianCount,
                 File outputFile) {
             this.success = success;
             this.priorReady = priorReady;
+            this.hqReady = hqReady;
             this.message = message;
             this.frameCount = frameCount;
             this.gaussianCount = gaussianCount;
@@ -50,12 +53,17 @@ public final class GaussianSplatJob {
         }
 
         private static Result fail(String message, int frameCount) {
-            return new Result(false, false, message, frameCount, 0, null);
+            return new Result(false, false, false, message, frameCount, 0, null);
         }
 
         private static Result priorReady(
                 String message, int frameCount, int gaussianCount, File priorFile) {
-            return new Result(false, true, message, frameCount, gaussianCount, priorFile);
+            return new Result(false, true, false, message, frameCount, gaussianCount, priorFile);
+        }
+
+        private static Result hqReady(
+                String message, int frameCount, int gaussianCount, File outputFile) {
+            return new Result(false, true, true, message, frameCount, gaussianCount, outputFile);
         }
     }
 
@@ -84,13 +92,13 @@ public final class GaussianSplatJob {
 
             File jobFile = new File(datasetDirectory, "3dgs_job.json");
             JSONObject job = new JSONObject();
-            job.put("format_version", 3);
-            job.put("status", "INITIALIZING_DEPTH_PRIOR");
+            job.put("format_version", 4);
+            job.put("status", "PREPARING_GEOMETRY");
             job.put("requested_at_unix_ms", System.currentTimeMillis());
             job.put("frame_count", count);
             job.put("transforms", "transforms.json");
             job.put("rgb_pattern", "frame_*.jpg");
-            job.put("rgb_role", "photometric_ground_truth");
+            job.put("rgb_role", "high_resolution_photometric_observation");
             job.put("max_rgb_width", stats.maxWidth);
             job.put("max_rgb_height", stats.maxHeight);
             job.put("camera_source", "saved_ARCore_pose_and_intrinsics");
@@ -98,41 +106,81 @@ public final class GaussianSplatJob {
             job.put("camera_convention", "OpenGL camera-to-world, root-anchor local");
             job.put("target_backend", "android_ndk_vulkan_photometric_3dgs");
             job.put("initializer_backend", "android_depth_prior_gaussian_v1");
+            job.put("hq_preview_backend", "android_highres_multiview_gaussian_v1");
             job.put("photometric_optimization", false);
             job.put("final_3dgs", false);
             job.put("note",
-                    "Depth-derived Gaussians are initialization only. COMPLETE is reserved for "
-                            + "RGB photometric optimization using the saved JPEG/Pose/intrinsics dataset.");
+                    "COMPLETE is reserved for differentiable rasterized L1+SSIM optimization. "
+                            + "Before that, the app builds a depth prior and an HQ high-resolution "
+                            + "multi-view appearance-refined Gaussian preview.");
             writeJson(jobFile, job);
 
-            GaussianSplatTrainer.Result initialization = GaussianSplatTrainer.train(
-                    datasetDirectory,
-                    (percent, message) -> DiagnosticLog.i(
-                            TAG, "depth-prior " + percent + "% " + message));
-            if (!initialization.success) {
-                job.put("status", "FAILED_DEPTH_PRIOR");
-                job.put("error", initialization.message);
+            File priorFile = new File(datasetDirectory, DEPTH_PRIOR_NAME);
+            int priorCount = 0;
+            if (!priorFile.isFile()) {
+                job.put("status", "INITIALIZING_DEPTH_PRIOR");
                 writeJson(jobFile, job);
-                return Result.fail(initialization.message, count);
+                GaussianSplatTrainer.Result initialization = GaussianSplatTrainer.train(
+                        datasetDirectory,
+                        (percent, message) -> DiagnosticLog.i(
+                                TAG, "depth-prior " + percent + "% " + message));
+                if (!initialization.success) {
+                    job.put("status", "FAILED_DEPTH_PRIOR");
+                    job.put("error", initialization.message);
+                    writeJson(jobFile, job);
+                    return Result.fail(initialization.message, count);
+                }
+                priorFile = moveInitializerOutput(datasetDirectory, initialization.outputFile);
+                priorCount = initialization.gaussianCount;
+                rewriteInitializerResult(datasetDirectory, priorFile, priorCount);
+            } else {
+                JSONObject existing = readResult(datasetDirectory);
+                priorCount = existing == null ? 0 : existing.optInt("gaussian_count", 0);
+                DiagnosticLog.i(TAG, "Reusing depth prior " + priorFile.getAbsolutePath());
             }
 
-            File priorFile = moveInitializerOutput(datasetDirectory, initialization.outputFile);
-            rewriteInitializerResult(datasetDirectory, priorFile, initialization.gaussianCount);
-
-            job.put("status", "DEPTH_PRIOR_READY");
-            job.put("depth_prior_completed_at_unix_ms", System.currentTimeMillis());
-            job.put("gaussian_count", initialization.gaussianCount);
+            job.put("status", "REFINING_HIGH_RES_RGB");
             job.put("depth_prior_output", priorFile.getName());
-            job.put("photometric_optimization", false);
-            job.put("final_3dgs", false);
+            job.put("depth_prior_gaussian_count", priorCount);
             writeJson(jobFile, job);
 
-            String message = "Depth prior初期化完了: " + initialization.gaussianCount
-                    + " Gaussians。高解像度JPEGを使うphotometric 3DGS学習は未完了です。";
-            DiagnosticLog.i(TAG, message + " output=" + priorFile.getAbsolutePath());
-            return Result.priorReady(message, count, initialization.gaussianCount, priorFile);
+            HighQualityGaussianTrainer.Result hq = HighQualityGaussianTrainer.train(
+                    datasetDirectory,
+                    (percent, message) -> DiagnosticLog.i(
+                            TAG, "hq " + percent + "% " + message));
+            if (!hq.success) {
+                job.put("status", "DEPTH_PRIOR_READY");
+                job.put("hq_error", hq.message);
+                job.put("photometric_optimization", false);
+                job.put("final_3dgs", false);
+                writeJson(jobFile, job);
+                String message = "Depth priorは準備済みですが、高解像度RGB反映に失敗しました: "
+                        + hq.message;
+                return Result.priorReady(message, count, priorCount, priorFile);
+            }
+
+            job.put("status", "HQ_RGB_REFINED");
+            job.put("hq_completed_at_unix_ms", System.currentTimeMillis());
+            job.put("gaussian_count", hq.gaussianCount);
+            job.put("textured_gaussian_count", hq.texturedGaussianCount);
+            job.put("hq_output", hq.outputFile.getName());
+            job.put("photometric_optimization", true);
+            job.put("photometric_fit", "weighted_multiview_SH1_least_squares");
+            job.put("rasterized_image_loss", false);
+            job.put("final_3dgs", false);
+            if (Double.isFinite(hq.photometricRmse)) {
+                job.put("photometric_rmse", hq.photometricRmse);
+            }
+            writeJson(jobFile, job);
+
+            String message = "高品質RGB反映完了: " + hq.gaussianCount + " Gaussians / "
+                    + hq.texturedGaussianCount + " textured。"
+                    + "保存済み高解像度JPEG・Pose・intrinsicsを使用しています。"
+                    + "Full Vulkan L1+SSIM optimizerは次段階です。";
+            DiagnosticLog.i(TAG, message + " output=" + hq.outputFile.getAbsolutePath());
+            return Result.hqReady(message, count, hq.gaussianCount, hq.outputFile);
         } catch (IOException | JSONException | RuntimeException e) {
-            DiagnosticLog.e(TAG, "Failed to prepare 3DGS dataset", e);
+            DiagnosticLog.e(TAG, "Failed to prepare/refine 3DGS dataset", e);
             return Result.fail(
                     "3DGS preparation failed: " + e.getClass().getSimpleName(), 0);
         }
@@ -219,7 +267,7 @@ public final class GaussianSplatJob {
         File resultFile = new File(datasetDirectory, "3dgs_result.json");
         JSONObject result = resultFile.isFile()
                 ? new JSONObject(readText(resultFile)) : new JSONObject();
-        result.put("format_version", 2);
+        result.put("format_version", 3);
         result.put("status", "DEPTH_PRIOR_READY");
         result.put("backend", "android_depth_prior_initializer_v2");
         result.put("output", priorFile.getName());
@@ -229,6 +277,18 @@ public final class GaussianSplatJob {
         result.put("note",
                 "This artifact is geometry initialization only. It is not a completed 3DGS model.");
         writeJson(resultFile, result);
+    }
+
+    private static JSONObject readResult(File datasetDirectory) {
+        File file = new File(datasetDirectory, "3dgs_result.json");
+        if (!file.isFile()) {
+            return null;
+        }
+        try {
+            return new JSONObject(readText(file));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static void copyFile(File source, File destination) throws IOException {
