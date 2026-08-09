@@ -250,7 +250,7 @@ public final class GaussianViewerActivity extends Activity {
                 float x = event.getX(0);
                 float y = event.getY(0);
                 if (!scaleDetector.isInProgress() && singleTouchReady) {
-                    renderer.rotate(x - lastX, y - lastY);
+                    renderer.rotate(-(x - lastX), y - lastY);
                 }
                 lastX = x;
                 lastY = y;
