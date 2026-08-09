@@ -33,24 +33,19 @@ def ceil_div(n: int, d: int) -> int:
 
 
 def verify_cumsum_hierarchy() -> None:
-    subgroup = 16
-    block = subgroup * subgroup
-    assert block == 256
-    assert block // subgroup == subgroup
-
-    sizes = [1, 16, 17, 256, 257, 1024, 1025, 37_635, 59_218, 87_777, 1_048_576]
+    block = 256
+    sizes = [1, 16, 17, 255, 256, 257, 1024, 1025, 37_635, 59_218, 87_777, 90_000, 1_048_576]
     for n in sizes:
         if n <= block:
             continue
         level1_alloc = ceil_div(n, block)
         if n <= block * block:
-            scan_uniform = level1_alloc
-            assert scan_uniform <= block
+            assert level1_alloc <= block
             continue
         if n <= block * block * block:
             level2_alloc = ceil_div(level1_alloc, block)
-            assert level2_alloc <= block
             assert level1_alloc > block
+            assert level2_alloc <= block
             continue
         raise AssertionError(f"test size exceeds supported three-level hierarchy: {n}")
 
@@ -146,23 +141,30 @@ def main() -> None:
     require(java, "BASE_TRAIN_STEPS = 750", "mobile schedule baseline changed unexpectedly")
     require(java, "MAX_TRAIN_STEPS = 1_000", "mobile schedule must remain bounded")
     require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
-    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_cumsum256_v2"',
-            "patched cumsum shaders must use a fresh on-device cache generation")
+    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_shared256_v3"',
+            "subgroup-independent cumsum shaders must use a fresh on-device cache generation")
+    require(java, '" cumsum=shared256"',
+            "runtime diagnostics must identify the cumsum shader generation")
     forbid(java, "DEFAULT_TRAIN_STEPS = 6_000", "desktop-length training schedule returned")
 
     m = re.search(r"MAX_TRAIN_STEPS\s*=\s*([\d_]+)", java)
     if not m or int(m.group(1).replace("_", "")) > 1000:
         raise SystemExit("mobile architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
 
-    # Mali subgroup-16 VkSplat cumsum invariants.
-    require(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
-            "renderer cumsum block replacement must use subgroup squared")
-    require(patch, "static const uint BLOCK_SIZE_0 = SUBGROUP_SIZE*SUBGROUP_SIZE;",
-            "shader physical workgroup must match the 256-element renderer block")
-    require(patch, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
-            "shader cumsum block replacement must use subgroup squared")
-    require(patch, "if (laneId >= offset) {",
-            "subgroup scan replacement must not read a negative predecessor lane")
+    # Android cumsum must be subgroup-independent. The old desktop implementation relied on wave
+    # width and produced deterministic wrong totals on Mali-G715.
+    require(patch, "const size_t block = 256;",
+            "renderer cumsum must use the same fixed 256-element workgroup as the shader")
+    require(patch, "static const uint BLOCK_SIZE = 256;",
+            "cumsum shader must launch exactly 256 invocations")
+    require(patch, "inclusiveWorkgroupScan",
+            "cumsum shader must use the shared-memory inclusive scan")
+    require(patch, "GroupMemoryBarrierWithGroupSync();",
+            "shared-memory scan requires workgroup barriers")
+    forbid(patch, "WavePrefixSum(",
+           "Android cumsum must not depend on the native subgroup width")
+    forbid(patch, "WaveReadLaneAt(",
+           "Android cumsum must not depend on subgroup lane reads")
     require(patch, "num_blocks", "two-level cumsum must use reduced block count")
     require(patch, "level1_uniforms", "three-level cumsum level 1 must use reduced count")
     require(patch, "level2_uniforms", "three-level cumsum level 2 must use reduced count")
@@ -176,26 +178,30 @@ def main() -> None:
 
     if VENDORED_RENDERER.is_file():
         renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
-        require(renderer, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
-                "prepared renderer still uses invalid subgroup-16 block geometry")
-        forbid(renderer, "deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
-               "prepared renderer still uses subgroup cubed")
+        require(renderer, "const size_t block = 256;",
+                "prepared renderer is not using fixed shared256 cumsum geometry")
+        require(renderer, "if (num_elements <= block)",
+                "single-pass cumsum threshold must match its 256-thread shader")
         require(renderer, "block_uniforms", "prepared VkSplat backend is missing cumsum fix")
         require(renderer, "level1_uniforms", "prepared VkSplat backend is missing level-1 bounds")
         require(renderer, "level2_uniforms", "prepared VkSplat backend is missing level-2 bounds")
 
     if VENDORED_CUMSUM.is_file():
         cumsum = VENDORED_CUMSUM.read_text(encoding="utf-8")
-        require(cumsum, "static const uint BLOCK_SIZE_0 = SUBGROUP_SIZE*SUBGROUP_SIZE;",
-                "prepared shader still launches 1024 invocations for a 256-element block")
-        forbid(cumsum, "static const uint BLOCK_SIZE_0 = 1024;",
-               "prepared shader still contains the divergent 1024-thread workgroup")
-        require(cumsum, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
-                "prepared cumsum shader does not bound block to one subgroup of subgroup sums")
-        forbid(cumsum, "SUBGROUP_SIZE*SUBGROUP_SIZE*SUBGROUP_SIZE)",
-               "prepared cumsum shader still uses desktop subgroup-cubed geometry")
-        require(cumsum, "if (laneId >= offset) {",
-                "prepared subgroup scan may read an invalid predecessor lane")
+        require(cumsum, "static const uint BLOCK_SIZE = 256;",
+                "prepared cumsum shader does not use the fixed 256-thread workgroup")
+        require(cumsum, "inclusiveWorkgroupScan",
+                "prepared cumsum shader is missing the shared-memory scan")
+        require(cumsum, "groupshared int32_t s_data[BLOCK_SIZE];",
+                "prepared cumsum shader is missing shared scan storage")
+        forbid(cumsum, "WavePrefixSum(",
+               "prepared cumsum shader still depends on subgroup prefix operations")
+        forbid(cumsum, "WaveReadLaneAt(",
+               "prepared cumsum shader still depends on subgroup lane operations")
+        forbid(cumsum, "SUBGROUP_SIZE",
+               "prepared cumsum shader must not encode a subgroup width")
+        forbid(cumsum, "return;",
+               "no cumsum invocation may exit before a workgroup barrier")
 
     print("PCS continuous scanner + mobile trainer architecture checks passed")
 
