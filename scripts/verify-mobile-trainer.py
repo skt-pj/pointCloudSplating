@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Build-time architecture checks for the PCS Android mobile scanner and 3DGS trainer."""
 from pathlib import Path
-import re
 import struct
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +8,8 @@ NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
 CUMSUM_SELFTEST = ROOT / "app/src/main/cpp/cumsum_selftest.cpp"
 CMAKE = ROOT / "app/src/main/cpp/CMakeLists.txt"
 JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
+JOB = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java"
+LIBRARY = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java"
 DIAGNOSTIC = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DiagnosticLog.java"
 TOMBSTONE_PARSER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeTombstoneParser.java"
 SCANNER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ScannerActivity.java"
@@ -19,11 +20,14 @@ EXPORTER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ColmapDataset
 MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
 RADIX_PATCH = ROOT / "scripts/patch-vksplat-radix-android.py"
+CHECKPOINT_PATCH = ROOT / "scripts/patch-vksplat-checkpoint-android.py"
 PIPELINE_DIAG_PATCH = ROOT / "scripts/patch-vksplat-pipeline-diagnostics-android.py"
 CUMSUM_GLSL = ROOT / "scripts/vksplat-android-shaders/cumsum.comp"
 PREPARE = ROOT / "scripts/prepare-vksplat-android.sh"
 VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
 VENDORED_PIPELINE = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_pipeline.cpp"
+VENDORED_TRAINER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_trainer.cpp"
+VENDORED_TRAINER_HEADER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_trainer.h"
 VENDORED_RADIX = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/shader/radix_sort"
 
 
@@ -72,7 +76,6 @@ def spirv_local_size(path: Path) -> tuple[int, int, int]:
         opcode = first & 0xffff
         if word_count == 0 or i + word_count > len(words):
             break
-        # OpExecutionMode opcode=16, LocalSize execution mode=17.
         if opcode == 16 and word_count >= 6 and words[i + 2] == 17:
             return words[i + 3], words[i + 4], words[i + 5]
         i += word_count
@@ -84,6 +87,8 @@ def main() -> None:
     cumsum_selftest = CUMSUM_SELFTEST.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
     java = JAVA.read_text(encoding="utf-8")
+    job = JOB.read_text(encoding="utf-8")
+    library = LIBRARY.read_text(encoding="utf-8")
     diagnostic = DIAGNOSTIC.read_text(encoding="utf-8")
     tombstone_parser = TOMBSTONE_PARSER.read_text(encoding="utf-8")
     scanner = SCANNER.read_text(encoding="utf-8")
@@ -94,6 +99,7 @@ def main() -> None:
     manifest = MANIFEST.read_text(encoding="utf-8")
     patch = CUMSUM_PATCH.read_text(encoding="utf-8")
     radix_patch = RADIX_PATCH.read_text(encoding="utf-8")
+    checkpoint_patch = CHECKPOINT_PATCH.read_text(encoding="utf-8")
     pipeline_diag = PIPELINE_DIAG_PATCH.read_text(encoding="utf-8")
     cumsum_glsl = CUMSUM_GLSL.read_text(encoding="utf-8")
     prepare = PREPARE.read_text(encoding="utf-8")
@@ -173,11 +179,18 @@ def main() -> None:
     forbid(native, "executeDefaultPostBackward(", "desktop Default densification is not the PCS mobile policy")
     forbid(native, "kAndroidDensifySoftCap", "post-hoc densification soft caps are not allowed")
 
-    require(java, "BASE_TRAIN_STEPS = 750", "mobile schedule baseline changed unexpectedly")
-    require(java, "MAX_TRAIN_STEPS = 1_000", "mobile schedule must remain bounded")
+    # Iteration count is user-controlled; 1000 is a default, never a hard quality ceiling.
+    require(java, "BASE_TRAIN_STEPS = 750", "first-run mobile default changed unexpectedly")
+    forbid(java, "MAX_TRAIN_STEPS", "training iterations must not have the old 1000-step quality ceiling")
+    require(java, "int requestedSteps", "native trainer must accept an explicit user step count")
+    require(java, "requestedSteps <= 0", "explicit step counts must be validated without a quality cap")
+    require(java, 'result.put("resumable_training", true)',
+            "final metadata must advertise resumable training")
+    require(java, 'result.put("checkpoint_state", "gaussians+adam+rng+step")',
+            "metadata must describe the persisted optimizer checkpoint")
     require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
     require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6"',
-            "Mali radix build must use a fresh shader cache generation")
+            "Mali radix build must use the established shader cache generation")
     require(java, '" cumsum=glslc256 radix=glslc256/subgroup16"',
             "runtime diagnostics must identify both Android GPU shader paths")
     require(java, "logCumsumShaderIdentity", "runtime must log exact cumsum SPIR-V identities")
@@ -188,11 +201,48 @@ def main() -> None:
     require(java, 'DiagnosticLog.i(TAG, "cumsum:selftest Java bridge begin")',
             "native self-test breadcrumbs must persist across process death")
     forbid(java, "cumsum=cpu_scan", "CPU cumsum workaround must not remain")
-    forbid(java, "DEFAULT_TRAIN_STEPS = 6_000", "desktop-length training schedule returned")
 
-    m = re.search(r"MAX_TRAIN_STEPS\s*=\s*([\d_]+)", java)
-    if not m or int(m.group(1).replace("_", "")) > 1000:
-        raise SystemExit("mobile architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
+    # Native continuation must restore before surface initialization and count progress cumulatively.
+    require(native, "trainer.restoreTrainingCheckpoint(buffers)",
+            "native training must restore persisted optimizer state")
+    require(native, "trainer.getResumeTrainingStep()", "native continuation needs the cumulative start step")
+    require(native, "completedBeforeRun", "native continuation must keep its previous cumulative step")
+    require(native, "targetStep", "progress must have a cumulative target")
+    require(native, "getCompletedTrainingSteps()", "native result must verify the persisted cumulative step")
+    require(native, '"added_steps"', "native result must report the requested extension size")
+    require(native, '"resumed"', "native result must distinguish initial from resumed runs")
+    forbid(native, "std::max(300,", "custom training must not be silently raised to 300 steps")
+
+    require(job, "continueTraining", "library needs an explicit continuation entry point")
+    require(job, "canContinueTraining", "legacy PLY-only models must be distinguished from checkpoints")
+    require(job, "previousSteps + additionalSteps",
+            "continuation must verify cumulative step growth rather than restarting at zero")
+    require(job, "optimizerの学習状態", "legacy models must not be mislabeled as exact resumes")
+    require(library, 'more.setText("追加学習")', "completed cards must expose additional training")
+    require(library, "TRAINING_PRESETS = {300, 1_000, 3_000, 10_000}",
+            "UI must expose useful short through high-quality training choices")
+    require(library, "showCustomTrainingInput", "user must be able to enter an arbitrary step count")
+    require(library, "Integer.MAX_VALUE", "custom step input must not impose a small quality cap")
+
+    # Full checkpoint is Gaussian parameters + Adam moments + RNG + optimizer step, written atomically.
+    require(checkpoint_patch, "restoreTrainingCheckpoint", "VkSplat checkpoint restore patch is missing")
+    require(checkpoint_patch, "saveTrainingCheckpoint", "VkSplat checkpoint save patch is missing")
+    require(checkpoint_patch, "g_xyz_ws", "Adam means moments must be checkpointed")
+    require(checkpoint_patch, "g_sh_coeffs_1", "Adam SH first moments must be checkpointed")
+    require(checkpoint_patch, "g_sh_coeffs_2", "Adam SH second moments must be checkpointed")
+    require(checkpoint_patch, "g_rotations", "Adam quaternion moments must be checkpointed")
+    require(checkpoint_patch, "g_scales_opacs", "Adam scale/opacity moments must be checkpointed")
+    require(checkpoint_patch, "rng_out << rng", "MCMC RNG state must be persisted")
+    require(checkpoint_patch, "rng_in >> rng", "MCMC RNG state must be restored")
+    require(checkpoint_patch, "resume_training_step", "Adam global step must survive process restarts")
+    require(checkpoint_patch, 'training_checkpoint_path + ".tmp"',
+            "checkpoint must be written to a temporary file first")
+    require(checkpoint_patch, "std::filesystem::rename(temp_path, training_checkpoint_path",
+            "checkpoint publication must use atomic rename")
+    require(checkpoint_patch, "config.means_lr_final * scene_scale",
+            "continued training must not jump the converged means LR back to its initial value")
+    require(pipeline_diag, "patch-vksplat-checkpoint-android.py",
+            "VkSplat preparation must apply the checkpoint implementation")
 
     # GPU cumsum must remain on Vulkan and subgroup-independent.
     require(patch, "const size_t block = 256;",
@@ -207,10 +257,7 @@ def main() -> None:
     forbid(patch, "copyFromDevice(input_buffer);", "renderer cumsum must remain GPU-side")
     verify_cumsum_hierarchy()
 
-    # Pixel/Mali radix sort must be compiled for the actual native subgroup width. The upstream
-    # desktop shader uses a 512-thread workgroup with shared layouts sized for 16 x 32-wide
-    # subgroups; on a 16-wide Mali subgroup that produces 32 subgroups and out-of-bounds shared
-    # histogram indexing. Keep exactly 16 subgroups by using 256 threads and matching C++ geometry.
+    # Pixel/Mali radix sort must be compiled for the actual native subgroup width.
     require(radix_patch, '#define SUBGROUP_SIZE 16',
             "radix shader must target the Pixel native subgroup width")
     require(radix_patch, '#define WORKGROUP_SIZE 256',
@@ -339,6 +386,22 @@ def main() -> None:
         require(pipeline, "maxWGInvocations=",
                 "prepared VkSplat pipeline lacks device workgroup limits")
 
+    if VENDORED_TRAINER.is_file() and VENDORED_TRAINER_HEADER.is_file():
+        trainer = VENDORED_TRAINER.read_text(encoding="utf-8")
+        trainer_header = VENDORED_TRAINER_HEADER.read_text(encoding="utf-8")
+        require(trainer_header, "restoreTrainingCheckpoint",
+                "prepared VkSplat trainer cannot restore a checkpoint")
+        require(trainer_header, "completed_training_step",
+                "prepared VkSplat trainer does not retain cumulative optimizer step")
+        require(trainer, "Saved PCS 3DGS checkpoint",
+                "prepared VkSplat trainer does not persist trainable state")
+        require(trainer, "Restored PCS 3DGS checkpoint",
+                "prepared VkSplat trainer does not restore trainable state")
+        require(trainer, "global_step = resume_training_step",
+                "prepared Adam optimizer is not cumulative across sessions")
+        require(trainer, "saveTrainingCheckpoint(buffers);",
+                "successful PLY output must also persist a continuation checkpoint")
+
     if VENDORED_RADIX.is_dir():
         radix_config = (VENDORED_RADIX / "config.glsl").read_text(encoding="utf-8")
         radix_downsweep = (VENDORED_RADIX / "downsweep.comp").read_text(encoding="utf-8")
@@ -357,7 +420,7 @@ def main() -> None:
                 raise SystemExit(
                     f"mobile architecture check failed: {name} LocalSize={local}, expected (256, 1, 1)")
 
-    print("PCS continuous scanner + mobile trainer architecture checks passed")
+    print("PCS continuous scanner + resumable mobile trainer architecture checks passed")
 
 
 if __name__ == "__main__":
