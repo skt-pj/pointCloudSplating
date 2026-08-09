@@ -147,7 +147,7 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text()
-block = '''        # Radix sort
+radix_block = '''        # Radix sort
         jobs.append(("radix_sort", [
             ShaderJob("upsweep.comp", {}),
             ShaderJob("spine.comp", {}),
@@ -155,9 +155,28 @@ block = '''        # Radix sort
         ], []))
 
 '''
-if block not in s:
+if radix_block not in s:
     raise SystemExit('compile_shaders radix block not found')
-s = s.replace(block, '')
+s = s.replace(radix_block, '')
+
+# PCS owns its Android cumsum shader as Vulkan GLSL and compiles it with the NDK reference path.
+# Do not let Slang produce another SPIR-V module with the same output names.
+cumsum_block = '''        # Prefix Sum
+        jobs.append(("cumsum.slang", [
+            ShaderJob(
+                f"cumsum_{phase_name}",
+                {"CUMSUM_PHASE": phase_id}
+            ) for phase_name, phase_id in [
+                ("block_scan", 1), ("scan_block_sums", 2),
+                ("add_block_offsets", 3), ("single_pass", 0)
+            ]
+        ], []))
+
+'''
+if cumsum_block not in s:
+    raise SystemExit('compile_shaders cumsum block not found')
+s = s.replace(cumsum_block, '')
+
 warning_block = '''            if output.stdout != "" or output.stderr != "":
                 return False, f"O Compiled {job_name} with warning: {output.stdout} {output.stderr}"
             return True, f"✓ Compiled {job_name}"
@@ -172,9 +191,10 @@ s = s.replace(warning_block, warning_fixed)
 p.write_text(s)
 PY
 
-# Patch renderer + cumsum source before Slang compilation so the APK assets contain the Mali fix.
+# Patch renderer hierarchy and add per-pipeline Android diagnostics before native compilation.
 pushd "$ROOT" >/dev/null
 python3 scripts/patch-vksplat-cumsum-android.py
+python3 scripts/patch-vksplat-pipeline-diagnostics-android.py
 popd >/dev/null
 
 SLANG_ROOT="$RUNNER_TEMP/slang-$SLANG_VERSION"
@@ -195,14 +215,51 @@ chmod +x "$SLANGC"
 echo "Using slangc: $SLANGC"
 
 GLSLC="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}/shader-tools/linux-x86_64/glslc"
-if [[ ! -x "$GLSLC" ]]; then
-  echo "glslc not found under Android NDK: $GLSLC" >&2
-  exit 1
-fi
+SHADER_TOOLS="$(dirname "$GLSLC")"
+SPIRV_VAL="$SHADER_TOOLS/spirv-val"
+SPIRV_DIS="$SHADER_TOOLS/spirv-dis"
+for tool in "$GLSLC" "$SPIRV_VAL" "$SPIRV_DIS"; do
+  if [[ ! -x "$tool" ]]; then
+    echo "required Android NDK shader tool not found: $tool" >&2
+    exit 1
+  fi
+done
 
 pushd "$THIRD/vksplat" >/dev/null
 python3 compile_shaders.py --slangc "$SLANGC" --glslc "$GLSLC"
 popd >/dev/null
+
+# Compile the subgroup-independent Android cumsum through the NDK's Vulkan GLSL reference path.
+CUMSUM_SRC="$ROOT/scripts/vksplat-android-shaders/cumsum.comp"
+CUMSUM_DST="$THIRD/vksplat/vksplat/shader/generated"
+mkdir -p "$CUMSUM_DST"
+declare -a CUMSUM_PHASES=(
+  "0:cumsum_single_pass"
+  "1:cumsum_block_scan"
+  "2:cumsum_scan_block_sums"
+  "3:cumsum_add_block_offsets"
+)
+for item in "${CUMSUM_PHASES[@]}"; do
+  phase="${item%%:*}"
+  name="${item#*:}"
+  out="$CUMSUM_DST/$name.spv"
+  "$GLSLC" -fshader-stage=compute -O --target-env=vulkan1.2 --target-spv=spv1.5 \
+    -DPCS_CUMSUM_PHASE="$phase" "$CUMSUM_SRC" -o "$out"
+  "$SPIRV_VAL" --target-env vulkan1.2 "$out"
+  dis="$RUNNER_TEMP/$name.spvasm"
+  "$SPIRV_DIS" "$out" -o "$dis"
+  if ! grep -Eq 'OpExecutionMode .* LocalSize 256 1 1' "$dis"; then
+    echo "$name does not declare LocalSize 256 1 1" >&2
+    exit 1
+  fi
+  if [[ "$phase" != "3" ]] && ! grep -q 'Workgroup' "$dis"; then
+    echo "$name is missing Workgroup storage" >&2
+    exit 1
+  fi
+  sha256sum "$out"
+done
+
+echo "Validated Android cumsum SPIR-V with NDK spirv-val"
 
 cp -R "$THIRD/vksplat/vksplat/shader/." "$ASSET_DIR/"
 printf '%s\n' "$VKSPLAT_COMMIT" > "$ASSET_DIR/VKSPLAT_COMMIT.txt"
@@ -212,4 +269,4 @@ cp "$THIRD/vksplat/LICENSE" "$NOTICE_DIR/VkSplat-LICENSE.txt"
 printf 'VkSplat source commit: %s\nhttps://github.com/harry7557558/vksplat\n' "$VKSPLAT_COMMIT" > "$NOTICE_DIR/VkSplat-NOTICE.txt"
 if [[ -f "$THIRD/glm/copying.txt" ]]; then cp "$THIRD/glm/copying.txt" "$NOTICE_DIR/GLM-LICENSE.txt"; fi
 
-echo "Prepared VkSplat $VKSPLAT_COMMIT for Android Mali subgroup 16"
+echo "Prepared VkSplat $VKSPLAT_COMMIT for Android Mali subgroup 16 with glslc256 GPU cumsum"
