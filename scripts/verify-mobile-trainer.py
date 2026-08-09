@@ -2,6 +2,7 @@
 """Build-time architecture checks for the PCS Android mobile scanner and 3DGS trainer."""
 from pathlib import Path
 import re
+import struct
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
@@ -17,11 +18,13 @@ FINALIZER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinal
 EXPORTER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ColmapDatasetExporter.java"
 MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
+RADIX_PATCH = ROOT / "scripts/patch-vksplat-radix-android.py"
 PIPELINE_DIAG_PATCH = ROOT / "scripts/patch-vksplat-pipeline-diagnostics-android.py"
 CUMSUM_GLSL = ROOT / "scripts/vksplat-android-shaders/cumsum.comp"
 PREPARE = ROOT / "scripts/prepare-vksplat-android.sh"
 VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
 VENDORED_PIPELINE = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_pipeline.cpp"
+VENDORED_RADIX = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/shader/radix_sort"
 
 
 def require(text: str, needle: str, reason: str) -> None:
@@ -55,6 +58,27 @@ def verify_cumsum_hierarchy() -> None:
         raise AssertionError(f"test size exceeds supported hierarchy: {n}")
 
 
+def spirv_local_size(path: Path) -> tuple[int, int, int]:
+    raw = path.read_bytes()
+    if len(raw) < 20 or len(raw) % 4 != 0:
+        raise SystemExit(f"mobile architecture check failed: invalid SPIR-V size: {path}")
+    words = struct.unpack(f"<{len(raw) // 4}I", raw)
+    if words[0] != 0x07230203:
+        raise SystemExit(f"mobile architecture check failed: invalid SPIR-V header: {path}")
+    i = 5
+    while i < len(words):
+        first = words[i]
+        word_count = first >> 16
+        opcode = first & 0xffff
+        if word_count == 0 or i + word_count > len(words):
+            break
+        # OpExecutionMode opcode=16, LocalSize execution mode=17.
+        if opcode == 16 and word_count >= 6 and words[i + 2] == 17:
+            return words[i + 3], words[i + 4], words[i + 5]
+        i += word_count
+    raise SystemExit(f"mobile architecture check failed: SPIR-V LocalSize missing: {path}")
+
+
 def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
     cumsum_selftest = CUMSUM_SELFTEST.read_text(encoding="utf-8")
@@ -69,6 +93,7 @@ def main() -> None:
     exporter = EXPORTER.read_text(encoding="utf-8")
     manifest = MANIFEST.read_text(encoding="utf-8")
     patch = CUMSUM_PATCH.read_text(encoding="utf-8")
+    radix_patch = RADIX_PATCH.read_text(encoding="utf-8")
     pipeline_diag = PIPELINE_DIAG_PATCH.read_text(encoding="utf-8")
     cumsum_glsl = CUMSUM_GLSL.read_text(encoding="utf-8")
     prepare = PREPARE.read_text(encoding="utf-8")
@@ -151,10 +176,10 @@ def main() -> None:
     require(java, "BASE_TRAIN_STEPS = 750", "mobile schedule baseline changed unexpectedly")
     require(java, "MAX_TRAIN_STEPS = 1_000", "mobile schedule must remain bounded")
     require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
-    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_v5"',
-            "glslc cumsum build must use the established shader cache generation")
-    require(java, '" cumsum=glslc256"',
-            "runtime diagnostics must identify the GPU cumsum compiler path")
+    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6"',
+            "Mali radix build must use a fresh shader cache generation")
+    require(java, '" cumsum=glslc256 radix=glslc256/subgroup16"',
+            "runtime diagnostics must identify both Android GPU shader paths")
     require(java, "logCumsumShaderIdentity", "runtime must log exact cumsum SPIR-V identities")
     require(java, 'MessageDigest.getInstance("SHA-256")',
             "runtime cumsum diagnostics must include SHA-256")
@@ -181,6 +206,29 @@ def main() -> None:
     forbid(patch, "CPU prefix scan", "CPU cumsum workaround returned")
     forbid(patch, "copyFromDevice(input_buffer);", "renderer cumsum must remain GPU-side")
     verify_cumsum_hierarchy()
+
+    # Pixel/Mali radix sort must be compiled for the actual native subgroup width. The upstream
+    # desktop shader uses a 512-thread workgroup with shared layouts sized for 16 x 32-wide
+    # subgroups; on a 16-wide Mali subgroup that produces 32 subgroups and out-of-bounds shared
+    # histogram indexing. Keep exactly 16 subgroups by using 256 threads and matching C++ geometry.
+    require(radix_patch, '#define SUBGROUP_SIZE 16',
+            "radix shader must target the Pixel native subgroup width")
+    require(radix_patch, '#define WORKGROUP_SIZE 256',
+            "radix shader must use 256 threads on subgroup-16 Mali")
+    require(radix_patch, 'SHMEM_SIZE = RADIX * (WORKGROUP_SIZE / SUBGROUP_SIZE)',
+            "downsweep shared histogram must be sized from radix x subgroup count")
+    require(radix_patch, 'subgroupBallotExclusiveBitCount(mask)',
+            "downsweep must use subgroup-width-safe exclusive ballot counting")
+    require(radix_patch, 'subgroupBallotBitCount(mask)',
+            "downsweep must use subgroup-width-safe ballot counting")
+    require(radix_patch, 'const int WORKGROUP_SIZE = 256;',
+            "renderer radix partition geometry must match GLSL")
+    require(radix_patch, 'ShaderJob("upsweep.comp", {})',
+            "Android preparation must recompile radix upsweep")
+    require(radix_patch, 'unsupported glslc target',
+            "Android radix compilation must remove the slang-only glslc target argument")
+    require(pipeline_diag, 'patch-vksplat-radix-android.py',
+            "VkSplat preparation must apply the Mali radix port")
 
     # The conformance test is a standalone Vulkan+cumsum path, not a whole-trainer probe.
     require(cumsum_selftest, "class CumsumSelfTestRenderer final : public VulkanGSRenderer",
@@ -277,12 +325,37 @@ def main() -> None:
         require(cumsum_fn, "executeCompute(", "prepared cumsum is not running on Vulkan")
         forbid(cumsum_fn, "copyFromDevice(input_buffer)", "prepared cumsum fell back to CPU")
 
+        sort_start = renderer.find("void VulkanGSRenderer::executeSort(")
+        if sort_start < 0:
+            raise SystemExit("mobile architecture check failed: prepared radix sort function not found")
+        sort_fn = renderer[sort_start:]
+        require(sort_fn, "const int WORKGROUP_SIZE = 256;",
+                "prepared radix C++ geometry is not Mali subgroup-16 safe")
+
     if VENDORED_PIPELINE.is_file():
         pipeline = VENDORED_PIPELINE.read_text(encoding="utf-8")
         require(pipeline, "Vulkan pipeline create begin shader=",
                 "prepared VkSplat pipeline lacks driver-abort diagnostics")
         require(pipeline, "maxWGInvocations=",
                 "prepared VkSplat pipeline lacks device workgroup limits")
+
+    if VENDORED_RADIX.is_dir():
+        radix_config = (VENDORED_RADIX / "config.glsl").read_text(encoding="utf-8")
+        radix_downsweep = (VENDORED_RADIX / "downsweep.comp").read_text(encoding="utf-8")
+        require(radix_config, "#define SUBGROUP_SIZE 16",
+                "prepared radix shader still targets desktop subgroup width")
+        require(radix_config, "#define WORKGROUP_SIZE 256",
+                "prepared radix shader still uses 512-thread desktop geometry")
+        require(radix_downsweep, "subgroupBallotExclusiveBitCount(mask)",
+                "prepared downsweep still uses handcrafted 32-wide ballot masks")
+        for name in ("upsweep.spv", "spine.spv", "downsweep.spv"):
+            path = VENDORED_RADIX / name
+            if not path.is_file():
+                raise SystemExit(f"mobile architecture check failed: Android radix SPIR-V missing: {path}")
+            local = spirv_local_size(path)
+            if local != (256, 1, 1):
+                raise SystemExit(
+                    f"mobile architecture check failed: {name} LocalSize={local}, expected (256, 1, 1)")
 
     print("PCS continuous scanner + mobile trainer architecture checks passed")
 
