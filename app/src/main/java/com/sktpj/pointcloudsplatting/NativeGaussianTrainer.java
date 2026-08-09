@@ -25,6 +25,7 @@ public final class NativeGaussianTrainer {
     private static final int MAX_TRAIN_STEPS = 1_000;
 
     private static final boolean NATIVE_AVAILABLE;
+    private static volatile boolean cumsumConformancePassed;
     static {
         boolean loaded = false;
         try {
@@ -91,6 +92,13 @@ public final class NativeGaussianTrainer {
             logCumsumShaderIdentity(shaderDir, "cumsum_block_scan.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_scan_block_sums.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_add_block_offsets.spv");
+
+            String cumsumFailure = ensureCumsumConformance(shaderDir, listener);
+            if (cumsumFailure != null) {
+                DiagnosticLog.w(TAG, "GPU cumsum conformance failed: " + cumsumFailure);
+                return Result.fail(cumsumFailure);
+            }
+
             File output = new File(dataset, "splat.ply");
             File working = prepared.root;
             int steps = trainingSteps(prepared.frameCount);
@@ -137,6 +145,29 @@ public final class NativeGaussianTrainer {
             DiagnosticLog.e(TAG, "Mobile 3DGS training failed", error);
             return Result.fail("端末内3DGS学習に失敗しました: " + error.getClass().getSimpleName());
         }
+    }
+
+    private static synchronized String ensureCumsumConformance(
+            File shaderDir, ProgressListener listener) throws Exception {
+        if (cumsumConformancePassed) return null;
+        notifyProgress(listener, 16, "GPU演算を検証しています…");
+        DiagnosticLog.i(TAG, "cumsum:selftest Java bridge begin");
+        String raw = nativeCumsumSelfTest(
+                ensureTrailingSlash(shaderDir.getAbsolutePath()),
+                (percent, message) -> {
+                    if (message != null && message.startsWith("cumsum:selftest")) {
+                        DiagnosticLog.i(TAG, message);
+                    }
+                    notifyProgress(listener, 16, "GPU演算を検証しています…");
+                });
+        JSONObject json = new JSONObject(raw);
+        boolean success = json.optBoolean("success", false);
+        String message = json.optString("message",
+                success ? "GPU cumsum conformance passed" : "GPU cumsum conformance failed");
+        if (!success) return message;
+        cumsumConformancePassed = true;
+        DiagnosticLog.i(TAG, "cumsum:selftest Java bridge COMPLETE");
+        return null;
     }
 
     private static int trainingSteps(int frames) {
@@ -277,6 +308,10 @@ public final class NativeGaussianTrainer {
     private static void notifyProgress(ProgressListener l, int p, String message) {
         if (l != null) l.onProgress(Math.max(0, Math.min(100, p)), message);
     }
+
+    private static native String nativeCumsumSelfTest(
+            String shaderDir,
+            ProgressListener listener);
 
     private static native String nativeTrain(
             String dataRoot,
