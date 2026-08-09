@@ -857,12 +857,11 @@ public final class ScannerActivity extends Activity
             cameraCharacteristics = cameraManager.getCameraCharacteristics(cameraId);
             manualSensorSupported = supportsManualSensor(cameraCharacteristics);
 
+            // Continuous capture consumes ARCore's CPU YUV stream directly. Keep JPEG capability
+            // metadata for diagnostics/legacy dataset compatibility, but do not allocate an
+            // ImageReader or attach a JPEG Surface to the SharedCamera session.
             jpegSize = DatasetCaptureManager.chooseJpegSize(cameraCharacteristics);
-            jpegReader = ImageReader.newInstance(
-                    jpegSize.getWidth(), jpegSize.getHeight(), ImageFormat.JPEG, 2);
             if (datasetCaptureManager != null) {
-                jpegReader.setOnImageAvailableListener(
-                        datasetCaptureManager::onJpegAvailable, cameraHandler);
                 datasetCaptureManager.configureCamera(cameraId, jpegSize, cameraCharacteristics);
             }
 
@@ -871,7 +870,7 @@ public final class ScannerActivity extends Activity
             cameraConfigSummary =
                     "AR CPU " + cpu.getWidth() + "x" + cpu.getHeight()
                             + " / GPU " + gpu.getWidth() + "x" + gpu.getHeight()
-                            + " / JPEG " + jpegSize.getWidth() + "x" + jpegSize.getHeight()
+                            + " / RGB=ARCore CPU YUV"
                             + " / manual=" + manualSensorSupported;
             DiagnosticLog.i(TAG,
                     "SharedCamera configured " + cameraConfigSummary
@@ -928,11 +927,10 @@ public final class ScannerActivity extends Activity
     }
 
     private void createCameraCaptureSession() {
-        if (cameraDevice == null || sharedCamera == null || jpegReader == null) return;
+        if (cameraDevice == null || sharedCamera == null) return;
         try {
             List<Surface> arCoreSurfaces = new ArrayList<>(sharedCamera.getArCoreSurfaces());
             List<Surface> sessionSurfaces = new ArrayList<>(arCoreSurfaces);
-            sessionSurfaces.add(jpegReader.getSurface());
 
             previewCaptureRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
             for (Surface surface : arCoreSurfaces) previewCaptureRequestBuilder.addTarget(surface);
@@ -943,7 +941,7 @@ public final class ScannerActivity extends Activity
             DiagnosticLog.i(TAG,
                     "Creating capture session arCoreSurfaces=" + arCoreSurfaces.size()
                             + " totalSurfaces=" + sessionSurfaces.size()
-                            + " JPEG=" + jpegSize);
+                            + " continuousCpuOnly=true");
             CameraCaptureSession.StateCallback wrapped =
                     sharedCamera.createARSessionStateCallback(cameraSessionStateCallback, cameraHandler);
             cameraDevice.createCaptureSession(sessionSurfaces, wrapped, cameraHandler);
@@ -1201,9 +1199,8 @@ public final class ScannerActivity extends Activity
                 com.google.ar.core.Pose datasetRootPose = datasetRootAnchor == null
                         ? camera.getPose() : datasetRootAnchor.getPose();
 
-                if (datasetCaptureManager != null
-                        && datasetCaptureManager.onArFrame(frame, camera, datasetRootPose)) {
-                    requestHighResolutionStill();
+                if (datasetCaptureManager != null) {
+                    datasetCaptureManager.onArFrame(frame, camera, datasetRootPose);
                 }
 
                 boolean containsNewDepthData = false;
