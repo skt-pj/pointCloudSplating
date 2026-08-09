@@ -1,0 +1,105 @@
+#version 450
+
+// PCS Android cumsum kernel.
+// This shader intentionally uses only core Vulkan 1.2 compute features: SSBOs, push constants,
+// workgroup shared memory, and workgroup barriers. It does not use subgroup/wave operations.
+
+#ifndef PCS_CUMSUM_PHASE
+#error PCS_CUMSUM_PHASE must be defined
+#endif
+
+#define PCS_CUMSUM_SINGLE_PASS 0
+#define PCS_CUMSUM_BLOCK_SCAN 1
+#define PCS_CUMSUM_SCAN_BLOCK_SUMS 2
+#define PCS_CUMSUM_ADD_BLOCK_OFFSETS 3
+#define PCS_BLOCK_SIZE 256
+
+layout(local_size_x = PCS_BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numElements;
+} pc;
+
+#if PCS_CUMSUM_PHASE == PCS_CUMSUM_SINGLE_PASS || PCS_CUMSUM_PHASE == PCS_CUMSUM_BLOCK_SCAN
+layout(set = 0, binding = 0, std430) readonly buffer InputBuffer {
+    int values[];
+} gInput;
+layout(set = 0, binding = 1, std430) buffer OutputBuffer {
+    int values[];
+} gOutput;
+#endif
+
+#if PCS_CUMSUM_PHASE == PCS_CUMSUM_BLOCK_SCAN || PCS_CUMSUM_PHASE == PCS_CUMSUM_SCAN_BLOCK_SUMS || PCS_CUMSUM_PHASE == PCS_CUMSUM_ADD_BLOCK_OFFSETS
+layout(set = 0, binding = 2, std430) buffer BlockSumsBuffer {
+    int values[];
+} gBlockSums;
+#endif
+
+#if PCS_CUMSUM_PHASE == PCS_CUMSUM_SCAN_BLOCK_SUMS || PCS_CUMSUM_PHASE == PCS_CUMSUM_ADD_BLOCK_OFFSETS
+layout(set = 0, binding = 1, std430) buffer PhaseOutputBuffer {
+    int values[];
+} gPhaseOutput;
+#endif
+
+#if PCS_CUMSUM_PHASE != PCS_CUMSUM_ADD_BLOCK_OFFSETS
+shared int sData[PCS_BLOCK_SIZE];
+
+void inclusiveWorkgroupScan(uint tid) {
+    // Hillis-Steele inclusive scan. Every invocation reaches every barrier. The barrier before each
+    // write ensures all invocations have consumed the previous iteration before any slot changes;
+    // the barrier after the write publishes the new iteration to the complete workgroup.
+    for (uint offset = 1u; offset < PCS_BLOCK_SIZE; offset <<= 1u) {
+        int addend = 0;
+        if (tid >= offset) {
+            addend = sData[tid - offset];
+        }
+        barrier();
+        if (tid >= offset) {
+            sData[tid] += addend;
+        }
+        barrier();
+    }
+}
+#endif
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint blockId = gl_WorkGroupID.x;
+    const uint gid = gl_GlobalInvocationID.x;
+
+#if PCS_CUMSUM_PHASE == PCS_CUMSUM_SINGLE_PASS
+    sData[tid] = gid < pc.numElements ? gInput.values[gid] : 0;
+    barrier();
+    inclusiveWorkgroupScan(tid);
+    if (gid < pc.numElements) {
+        gOutput.values[gid] = sData[tid];
+    }
+
+#elif PCS_CUMSUM_PHASE == PCS_CUMSUM_BLOCK_SCAN
+    sData[tid] = gid < pc.numElements ? gInput.values[gid] : 0;
+    barrier();
+    inclusiveWorkgroupScan(tid);
+    if (gid < pc.numElements) {
+        gOutput.values[gid] = sData[tid];
+    }
+    if (tid == PCS_BLOCK_SIZE - 1u) {
+        gBlockSums.values[blockId] = sData[tid];
+    }
+
+#elif PCS_CUMSUM_PHASE == PCS_CUMSUM_SCAN_BLOCK_SUMS
+    sData[tid] = gid < pc.numElements ? gBlockSums.values[gid] : 0;
+    barrier();
+    inclusiveWorkgroupScan(tid);
+    if (gid < pc.numElements) {
+        gBlockSums.values[gid] = sData[tid];
+    }
+
+#elif PCS_CUMSUM_PHASE == PCS_CUMSUM_ADD_BLOCK_OFFSETS
+    if (gid < pc.numElements && blockId > 0u) {
+        gPhaseOutput.values[gid] += gBlockSums.values[blockId - 1u];
+    }
+
+#else
+#error Invalid PCS_CUMSUM_PHASE
+#endif
+}
