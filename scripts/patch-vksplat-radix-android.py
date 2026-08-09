@@ -121,6 +121,21 @@ if old_geometry not in renderer:
 renderer = renderer.replace(old_geometry, new_geometry, 1)
 renderer_path.write_text(renderer)
 
+# NDK glslc intentionally does not implement GL_ARB_shading_language_include. Make each radix
+# shader self-contained by replacing the single local include with the already patched Android
+# config. This is preprocessing only; the shader algorithm remains the VkSplat radix implementation.
+inlined_config = "// inlined config.glsl for Android NDK glslc\n" + config.rstrip() + "\n"
+for name in ("upsweep.comp", "spine.comp", "downsweep.comp"):
+    shader_path = root / "shader/radix_sort" / name
+    shader = shader_path.read_text()
+    extension_line = "#extension GL_ARB_shading_language_include : require\n"
+    include_line = '#include "./config.glsl"\n'
+    if extension_line not in shader or include_line not in shader:
+        raise SystemExit(f"radix include patch anchor not found: {name}")
+    shader = shader.replace(extension_line, "", 1)
+    shader = shader.replace(include_line, inlined_config, 1)
+    shader_path.write_text(shader)
+
 # prepare-vksplat-android.sh deliberately removes the upstream radix job because VkSplat's glslc
 # wrapper passes a slang-only '-target spirv' argument. Re-add the job after fixing that wrapper so
 # the Android NDK glslc recompiles all three radix shaders from the patched subgroup-16 GLSL.
