@@ -5,7 +5,11 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
+CUMSUM_SELFTEST = ROOT / "app/src/main/cpp/cumsum_selftest.cpp"
+CMAKE = ROOT / "app/src/main/cpp/CMakeLists.txt"
 JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
+DIAGNOSTIC = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DiagnosticLog.java"
+TOMBSTONE_PARSER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeTombstoneParser.java"
 SCANNER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ScannerActivity.java"
 CAPTURE = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetCaptureManager.java"
 CAMERA_CONFIG = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/CameraConfigSelector.java"
@@ -36,7 +40,7 @@ def ceil_div(n: int, d: int) -> int:
 
 def verify_cumsum_hierarchy() -> None:
     block = 256
-    for n in [1, 17, 255, 256, 257, 1025, 37_635, 90_000, 120_000, 1_048_576]:
+    for n in [1, 16, 255, 256, 257, 1024, 1025, 37_635, 90_000, 120_000, 1_048_576]:
         if n <= block:
             continue
         level1 = ceil_div(n, block)
@@ -53,7 +57,11 @@ def verify_cumsum_hierarchy() -> None:
 
 def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
+    cumsum_selftest = CUMSUM_SELFTEST.read_text(encoding="utf-8")
+    cmake = CMAKE.read_text(encoding="utf-8")
     java = JAVA.read_text(encoding="utf-8")
+    diagnostic = DIAGNOSTIC.read_text(encoding="utf-8")
+    tombstone_parser = TOMBSTONE_PARSER.read_text(encoding="utf-8")
     scanner = SCANNER.read_text(encoding="utf-8")
     capture = CAPTURE.read_text(encoding="utf-8")
     camera_config = CAMERA_CONFIG.read_text(encoding="utf-8")
@@ -144,12 +152,16 @@ def main() -> None:
     require(java, "MAX_TRAIN_STEPS = 1_000", "mobile schedule must remain bounded")
     require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
     require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_v5"',
-            "glslc cumsum build must use a fresh on-device shader cache generation")
+            "glslc cumsum build must use the established shader cache generation")
     require(java, '" cumsum=glslc256"',
             "runtime diagnostics must identify the GPU cumsum compiler path")
     require(java, "logCumsumShaderIdentity", "runtime must log exact cumsum SPIR-V identities")
     require(java, 'MessageDigest.getInstance("SHA-256")',
             "runtime cumsum diagnostics must include SHA-256")
+    require(java, "nativeCumsumSelfTest", "cumsum conformance must be a separate JNI path")
+    require(java, "ensureCumsumConformance", "training must pass cumsum conformance first")
+    require(java, 'DiagnosticLog.i(TAG, "cumsum:selftest Java bridge begin")',
+            "native self-test breadcrumbs must persist across process death")
     forbid(java, "cumsum=cpu_scan", "CPU cumsum workaround must not remain")
     forbid(java, "DEFAULT_TRAIN_STEPS = 6_000", "desktop-length training schedule returned")
 
@@ -157,25 +169,40 @@ def main() -> None:
     if not m or int(m.group(1).replace("_", "")) > 1000:
         raise SystemExit("mobile architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
 
-    # GPU cumsum must be subgroup-independent and its hierarchy must match the shader local size.
+    # GPU cumsum must remain on Vulkan and subgroup-independent.
     require(patch, "const size_t block = 256;",
             "renderer cumsum must use the shader's fixed workgroup size")
     require(patch, "num_blocks", "two-level cumsum must use ceil-div block count")
     require(patch, "level1_uniforms", "three-level cumsum must pass level-1 element count")
     require(patch, "level2_uniforms", "three-level cumsum must pass level-2 element count")
-    require(patch, "GPU cumsum self-test begin block=256",
-            "renderer must run a cumsum self-test before training")
-    require(patch, "GPU cumsum self-test dispatch n=%zu",
-            "self-test must expose the exact workload being executed")
-    require(patch, "37635, 90000",
-            "self-test must cover the observed two-level and three-level Pixel workloads")
-    require(patch, "GPU cumsum self-test FAIL",
-            "self-test mismatch details must be logged")
-    require(patch, "DEVICE_GUARD;\n                executeCumsum(pcsTestBuffers",
-            "self-test cumsum must enter VkSplat command recording before PerfTimer timestamps")
+    require(patch, 'spirv_paths.at("cumsum_single_pass"), 0, false',
+            "cumsum pipeline must not request a fixed subgroup size")
+    forbid(patch, "GPU cumsum self-test", "self-test must not be embedded in full renderer initialization")
     forbid(patch, "CPU prefix scan", "CPU cumsum workaround returned")
     forbid(patch, "copyFromDevice(input_buffer);", "renderer cumsum must remain GPU-side")
     verify_cumsum_hierarchy()
+
+    # The conformance test is a standalone Vulkan+cumsum path, not a whole-trainer probe.
+    require(cumsum_selftest, "class CumsumSelfTestRenderer final : public VulkanGSRenderer",
+            "isolated cumsum renderer is missing")
+    require(cumsum_selftest, "VulkanGSPipeline::initialize(deviceId)",
+            "self-test must initialize Vulkan without full trainer pipelines")
+    require(cumsum_selftest, 'createComputePipeline(pipeline, path, 0, false)',
+            "self-test cumsum pipelines must be subgroup-independent")
+    require(cumsum_selftest, "{1, 16, 255, 256, 257, 1024, 1025, 37635, 90000}",
+            "self-test must cover boundaries and observed Pixel workloads")
+    require(cumsum_selftest, "DeviceGuard guard(this)",
+            "cumsum dispatch must run inside a valid VkSplat command batch")
+    require(cumsum_selftest, "executeCumsum(buffers, input, output)",
+            "self-test must exercise the production GPU cumsum implementation")
+    require(cumsum_selftest, "copyFromDevice(output)",
+            "self-test must compare the full GPU prefix output against CPU reference")
+    require(cumsum_selftest, "cumsum self-test mismatch n=",
+            "self-test must report the exact failing prefix index")
+    require(cumsum_selftest, "cumsum:selftest dispatch begin",
+            "dispatch stage must persist before a possible native abort")
+    forbid(cumsum_selftest, "VulkanGSTrainer", "cumsum self-test must stay independent of trainer initialization")
+    require(cmake, "cumsum_selftest.cpp", "isolated cumsum test must be linked into the JNI library")
 
     require(cumsum_glsl, "#version 450", "Android cumsum must be Vulkan GLSL")
     require(cumsum_glsl, "#define PCS_BLOCK_SIZE 256", "GLSL cumsum local size changed")
@@ -188,6 +215,18 @@ def main() -> None:
     forbid(cumsum_glsl, "subgroupAdd", "custom cumsum must not use subgroup arithmetic")
     forbid(cumsum_glsl, "WavePrefix", "custom cumsum must not use wave operations")
     forbid(cumsum_glsl, "WaveRead", "custom cumsum must not use wave operations")
+
+    # Native crash diagnostics must preserve the actual Android tombstone, not only its existence.
+    require(diagnostic, "PREF_LAST_NATIVE_TRACE_TIMESTAMP",
+            "native tombstone capture needs an independent cursor so older unparsed crashes can be recovered")
+    require(diagnostic, "exit.getTraceInputStream()",
+            "native crash diagnostics must read ApplicationExitInfo tombstones")
+    require(diagnostic, "NativeTombstoneParser.parse(trace)",
+            "native tombstones must be rendered into the saved text diagnostics")
+    require(tombstone_parser, "case 16:", "tombstone parser must read the thread map")
+    require(tombstone_parser, "out.frames.add(parseFrame", "tombstone parser must read native backtrace frames")
+    require(tombstone_parser, 'append(" rel_pc=0x")', "native frame relative PCs must be retained for symbolization")
+    require(tombstone_parser, "abortMessage", "native abort messages must be retained")
 
     # Pipeline diagnostics must isolate driver aborts to an exact shader and Vulkan call.
     require(pipeline_diag, "Vulkan pipeline begin shader=",
@@ -227,15 +266,9 @@ def main() -> None:
         require(renderer, "block_uniforms", "prepared renderer is missing two-level bounds")
         require(renderer, "level1_uniforms", "prepared renderer is missing level-1 bounds")
         require(renderer, "level2_uniforms", "prepared renderer is missing level-2 bounds")
-        require(renderer, "GPU cumsum self-test COMPLETE",
-                "prepared renderer is missing runtime GPU cumsum self-test")
-        self_test_start = renderer.find('PCS_CUMSUM_LOGI("GPU cumsum self-test begin block=256")')
-        self_test_end = renderer.find('PCS_CUMSUM_LOGI("GPU cumsum self-test COMPLETE")', self_test_start)
-        if self_test_start < 0 or self_test_end < 0:
-            raise SystemExit("mobile architecture check failed: prepared cumsum self-test not found")
-        self_test = renderer[self_test_start:self_test_end]
-        require(self_test, "DEVICE_GUARD;\n                executeCumsum(pcsTestBuffers",
-                "prepared self-test calls cumsum before a command batch is recording")
+        require(renderer, 'spirv_paths.at("cumsum_single_pass"), 0, false',
+                "prepared cumsum pipeline still requests subgroup compatibility")
+        forbid(renderer, "GPU cumsum self-test", "prepared renderer still embeds the self-test")
         start = renderer.find("void VulkanGSRenderer::executeCumsum(")
         end = renderer.find("void VulkanGSRenderer::executeCalculateIndexBufferOffset(", start)
         if start < 0 or end < 0:
