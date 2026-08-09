@@ -195,7 +195,9 @@ struct Uniforms {
 void inclusiveWorkgroupScan(uint tid) {
     [ForceUnroll]
     for (uint offset = 1; offset < BLOCK_SIZE; offset <<= 1) {
-        int32_t addend = (tid >= offset) ? s_data[tid - offset] : 0;
+        int32_t addend = 0;
+        if (tid >= offset)
+            addend = s_data[tid - offset];
         GroupMemoryBarrierWithGroupSync();
         if (tid >= offset)
             s_data[tid] += addend;
