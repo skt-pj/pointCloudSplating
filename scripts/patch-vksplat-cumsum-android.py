@@ -4,19 +4,30 @@ from pathlib import Path
 renderer_path = Path("app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp")
 renderer = renderer_path.read_text()
 
-# VkSplat's block scan assumes the list of subgroup sums fits in exactly one subgroup. That is true
-# for its desktop default (1024 threads / subgroup 32 = 32 sums), but false on Mali subgroup 16
-# (1024 / 16 = 64 sums). Bound the block to subgroup^2 so the second-level WavePrefixSum always
-# operates on at most one subgroup worth of partial sums.
-old_block_limit = (
-    "    const size_t block_limit = deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;\n"
-)
-new_block_limit = (
-    "    const size_t block_limit = deviceInfo.subgroupSize*deviceInfo.subgroupSize;\n"
-)
-if old_block_limit not in renderer:
-    raise SystemExit("cumsum block-limit patch anchor not found")
-renderer = renderer.replace(old_block_limit, new_block_limit, 1)
+# Android uses a fixed 256-invocation cumsum workgroup. Do not derive cumsum geometry from
+# VkPhysicalDeviceSubgroupProperties: Mali subgroup width is an implementation detail and the
+# prefix sum must remain correct regardless of whether a driver exposes 16- or 32-lane subgroups.
+old_geometry = '''    const size_t block_0 = 1024;
+    const size_t block_limit = deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;
+    const size_t block = std::min(block_0, block_limit);
+'''
+new_geometry = '''    const size_t block = 256;
+'''
+if old_geometry not in renderer:
+    raise SystemExit("cumsum geometry patch anchor not found")
+renderer = renderer.replace(old_geometry, new_geometry, 1)
+
+old_single_pass = '''    if (num_elements <= block_0) {
+        executeCompute(
+            {{num_elements, block_0}},
+'''
+new_single_pass = '''    if (num_elements <= block) {
+        executeCompute(
+            {{num_elements, block}},
+'''
+if old_single_pass not in renderer:
+    raise SystemExit("cumsum single-pass geometry patch anchor not found")
+renderer = renderer.replace(old_single_pass, new_single_pass, 1)
 
 old_two_level = '''        bufferMemoryBarrier({
             { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_WRITE },
@@ -146,44 +157,119 @@ if old_three_level not in renderer:
 renderer = renderer.replace(old_three_level, new_three_level, 1)
 renderer_path.write_text(renderer)
 
+# Replace the pinned desktop-oriented wave/subgroup scan with a subgroup-independent workgroup
+# scan. All 256 invocations participate in every GroupMemoryBarrierWithGroupSync(). Partial blocks
+# are zero padded, so the final lane always carries the inclusive block sum.
 shader_path = Path("app/src/main/cpp/third_party/vksplat/vksplat/slang/cumsum.slang")
-shader = shader_path.read_text()
+shader_path.write_text(r'''#define CUMSUM_PHASE_blockScan 1
+#define CUMSUM_PHASE_scanBlockSums 2
+#define CUMSUM_PHASE_addBlockOffsets 3
+#define CUMSUM_PHASE_singlePassPrefixSum 0
 
-# The renderer now dispatches 256 elements per workgroup on subgroup-16 Mali. The shader must have
-# the same physical workgroup size. Leaving numthreads at 1024 makes 768 invocations return before
-# GroupMemoryBarrierWithGroupSync(), which violates the workgroup barrier requirement and corrupts
-# the prefix sum on Pixel 10a.
-old_shader_threads = "    static const uint BLOCK_SIZE_0 = 1024;\n"
-new_shader_threads = "    static const uint BLOCK_SIZE_0 = SUBGROUP_SIZE*SUBGROUP_SIZE;\n"
-if old_shader_threads not in shader:
-    raise SystemExit("cumsum shader workgroup-size patch anchor not found")
-shader = shader.replace(old_shader_threads, new_shader_threads, 1)
+#ifndef CUMSUM_PHASE
+#define CUMSUM_PHASE -1
+#endif
 
-old_shader_block = "    #define BLOCK_SIZE min(BLOCK_SIZE_0, SUBGROUP_SIZE*SUBGROUP_SIZE*SUBGROUP_SIZE)\n"
-new_shader_block = "    #define BLOCK_SIZE min(BLOCK_SIZE_0, SUBGROUP_SIZE*SUBGROUP_SIZE)\n"
-if old_shader_block not in shader:
-    raise SystemExit("cumsum shader block-size patch anchor not found")
-shader = shader.replace(old_shader_block, new_shader_block, 1)
+#if CUMSUM_PHASE == CUMSUM_PHASE_blockScan
+#define blockScan main
+#elif CUMSUM_PHASE == CUMSUM_PHASE_scanBlockSums
+#define scanBlockSums main
+#elif CUMSUM_PHASE == CUMSUM_PHASE_addBlockOffsets
+#define addBlockOffsets main
+#elif CUMSUM_PHASE == CUMSUM_PHASE_singlePassPrefixSum
+#define singlePassPrefixSum main
+#endif
 
-# Avoid an out-of-range WaveReadLaneAt on lanes smaller than offset. Desktop drivers commonly mask
-# this benignly; Mali is not required to. Only read a predecessor lane when it actually exists.
-old_subgroup_scan = '''    for (uint offset = 1; offset < SUBGROUP_SIZE; offset <<= 1) {
-        // int32_t temp = WaveReadLaneAt(val, (laneId - offset) & (SUBGROUP_SIZE - 1));
-        int32_t temp = WaveReadLaneAt(val, laneId - offset);
-        if (laneId >= offset)
-            val += temp;
+static const uint BLOCK_SIZE = 256;
+
+layout(binding=0) StructuredBuffer<int32_t> g_input;
+layout(binding=1) RWStructuredBuffer<int32_t> g_output;
+layout(binding=2) RWStructuredBuffer<int32_t> g_blockSums;
+
+groupshared int32_t s_data[BLOCK_SIZE];
+
+struct Uniforms {
+    uint32_t numElements;
+};
+
+void inclusiveWorkgroupScan(uint tid) {
+    [ForceUnroll]
+    for (uint offset = 1; offset < BLOCK_SIZE; offset <<= 1) {
+        int32_t addend = (tid >= offset) ? s_data[tid - offset] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        if (tid >= offset)
+            s_data[tid] += addend;
+        GroupMemoryBarrierWithGroupSync();
     }
-'''
-new_subgroup_scan = '''    for (uint offset = 1; offset < SUBGROUP_SIZE; offset <<= 1) {
-        if (laneId >= offset) {
-            int32_t temp = WaveReadLaneAt(val, laneId - offset);
-            val += temp;
-        }
-    }
-'''
-if old_subgroup_scan not in shader:
-    raise SystemExit("cumsum subgroup scan patch anchor not found")
-shader = shader.replace(old_subgroup_scan, new_subgroup_scan, 1)
-shader_path.write_text(shader)
+}
 
-print("Patched VkSplat cumsum for Android subgroup-16 with matched 256-thread workgroups")
+[numthreads(BLOCK_SIZE, 1, 1)]
+void blockScan(
+    uint3 groupId : SV_GroupID,
+    uint3 localId : SV_GroupThreadID,
+    uniform Uniforms uniforms
+) {
+    uint tid = localId.x;
+    uint blockId = groupId.x;
+    uint gid = blockId * BLOCK_SIZE + tid;
+
+    s_data[tid] = (gid < uniforms.numElements) ? g_input[gid] : 0;
+    GroupMemoryBarrierWithGroupSync();
+    inclusiveWorkgroupScan(tid);
+
+    if (gid < uniforms.numElements)
+        g_output[gid] = s_data[tid];
+    if (tid == BLOCK_SIZE - 1)
+        g_blockSums[blockId] = s_data[tid];
+}
+
+[numthreads(BLOCK_SIZE, 1, 1)]
+void scanBlockSums(
+    uint3 groupId : SV_GroupID,
+    uint3 localId : SV_GroupThreadID,
+    uniform Uniforms uniforms
+) {
+    uint tid = localId.x;
+    uint blockId = groupId.x;
+    uint gid = blockId * BLOCK_SIZE + tid;
+
+    s_data[tid] = (gid < uniforms.numElements) ? g_blockSums[gid] : 0;
+    GroupMemoryBarrierWithGroupSync();
+    inclusiveWorkgroupScan(tid);
+
+    if (gid < uniforms.numElements)
+        g_blockSums[gid] = s_data[tid];
+}
+
+[numthreads(BLOCK_SIZE, 1, 1)]
+void addBlockOffsets(
+    uint3 groupId : SV_GroupID,
+    uint3 localId : SV_GroupThreadID,
+    uniform Uniforms uniforms
+) {
+    uint tid = localId.x;
+    uint blockId = groupId.x;
+    uint gid = blockId * BLOCK_SIZE + tid;
+    if (gid < uniforms.numElements && blockId > 0)
+        g_output[gid] += g_blockSums[blockId - 1];
+}
+
+[numthreads(BLOCK_SIZE, 1, 1)]
+void singlePassPrefixSum(
+    uint3 localId : SV_GroupThreadID,
+    uint3 globalId : SV_DispatchThreadID,
+    uniform Uniforms uniforms
+) {
+    uint tid = localId.x;
+    uint gid = globalId.x;
+
+    s_data[tid] = (gid < uniforms.numElements) ? g_input[gid] : 0;
+    GroupMemoryBarrierWithGroupSync();
+    inclusiveWorkgroupScan(tid);
+
+    if (gid < uniforms.numElements)
+        g_output[gid] = s_data[tid];
+}
+''')
+
+print("Patched VkSplat cumsum for Android with subgroup-independent 256-thread scan")
