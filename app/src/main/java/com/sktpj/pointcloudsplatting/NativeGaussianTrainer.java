@@ -17,7 +17,7 @@ import java.security.MessageDigest;
 public final class NativeGaussianTrainer {
     private static final String TAG = "Native3DGS";
     private static final String ASSET_ROOT = "vksplat_shader";
-    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_v5";
+    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6";
 
     // PocketGS demonstrates that the mobile operating regime is hundreds, not tens of thousands,
     // of iterations. Surface-aware initialization and bounded density control are designed around it.
@@ -87,7 +87,7 @@ public final class NativeGaussianTrainer {
             File shaderDir = ensureShaderFiles(context);
             DiagnosticLog.i(TAG,
                     "Using VkSplat shader cache=" + shaderDir.getName()
-                            + " cumsum=glslc256");
+                            + " cumsum=glslc256 radix=glslc256/subgroup16");
             logCumsumShaderIdentity(shaderDir, "cumsum_single_pass.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_block_scan.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_scan_block_sums.spv");
