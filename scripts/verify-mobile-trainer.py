@@ -15,7 +15,6 @@ MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
 PREPARE = ROOT / "scripts/prepare-vksplat-android.sh"
 VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
-VENDORED_CUMSUM = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/slang/cumsum.slang"
 
 
 def require(text: str, needle: str, reason: str) -> None:
@@ -28,26 +27,21 @@ def forbid(text: str, needle: str, reason: str) -> None:
         raise SystemExit(f"mobile architecture check failed: {reason}: found {needle!r}")
 
 
-def ceil_div(n: int, d: int) -> int:
-    return (n + d - 1) // d
-
-
-def verify_cumsum_hierarchy() -> None:
-    block = 256
-    sizes = [1, 16, 17, 255, 256, 257, 1024, 1025, 37_635, 59_218, 87_777, 90_000, 1_048_576]
-    for n in sizes:
-        if n <= block:
-            continue
-        level1_alloc = ceil_div(n, block)
-        if n <= block * block:
-            assert level1_alloc <= block
-            continue
-        if n <= block * block * block:
-            level2_alloc = ceil_div(level1_alloc, block)
-            assert level1_alloc > block
-            assert level2_alloc <= block
-            continue
-        raise AssertionError(f"test size exceeds supported three-level hierarchy: {n}")
+def verify_cpu_cumsum_reference() -> None:
+    # Mirrors the inclusive int32 prefix-sum contract used by VkSplat. Exercise the sizes observed on
+    # Pixel 10a plus the configured initial and maximum Gaussian budgets.
+    for n in [1, 9, 257, 37_635, 90_000, 120_000]:
+        values = [((i * 17) % 7) for i in range(n)]
+        running = 0
+        out = []
+        for value in values:
+            running += value
+            assert -(2**31) <= running < 2**31
+            out.append(running)
+        assert len(out) == n
+        assert out[-1] == sum(values)
+        if n > 1:
+            assert all(out[i] >= out[i - 1] for i in range(1, n))
 
 
 def main() -> None:
@@ -132,8 +126,8 @@ def main() -> None:
     require(native, "kNormalNeighbors = 16", "surface normal initialization must use K=16")
     require(native, "kScaleNeighbors = 3", "surface scale initialization must use K=3")
     require(native, "initializeSurfaceGaussians", "surface-aware initialization is required")
-    require(native, "validateProjectionInvariants", "GPU projection/cumsum must be checked semantically")
-    require(native, "cpuTiles=", "CPU/GPU tile-sum comparison must remain observable")
+    require(native, "validateProjectionInvariants", "projection/prefix-sum semantics must be checked")
+    require(native, "cpuTiles=", "tile-sum comparison must remain observable on failure")
     require(native, "kTileWorkingSetBudgetBytes", "tile memory must be budgeted before allocation")
     forbid(native, "executeDefaultPostBackward(", "desktop Default densification is not the PCS mobile policy")
     forbid(native, "kAndroidDensifySoftCap", "post-hoc densification soft caps are not allowed")
@@ -141,67 +135,57 @@ def main() -> None:
     require(java, "BASE_TRAIN_STEPS = 750", "mobile schedule baseline changed unexpectedly")
     require(java, "MAX_TRAIN_STEPS = 1_000", "mobile schedule must remain bounded")
     require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
-    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_shared256_v3"',
-            "subgroup-independent cumsum shaders must use a fresh on-device cache generation")
-    require(java, '" cumsum=shared256"',
-            "runtime diagnostics must identify the cumsum shader generation")
+    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_cpuscan_v4"',
+            "CPU cumsum build must use a fresh on-device shader cache generation")
+    require(java, '" cumsum=cpu_scan"',
+            "runtime diagnostics must identify the CPU cumsum path")
     forbid(java, "DEFAULT_TRAIN_STEPS = 6_000", "desktop-length training schedule returned")
 
     m = re.search(r"MAX_TRAIN_STEPS\s*=\s*([\d_]+)", java)
     if not m or int(m.group(1).replace("_", "")) > 1000:
         raise SystemExit("mobile architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
 
-    # Android cumsum must be subgroup-independent. The old desktop implementation relied on wave
-    # width and produced deterministic wrong totals on Mali-G715.
-    require(patch, "const size_t block = 256;",
-            "renderer cumsum must use the same fixed 256-element workgroup as the shader")
-    require(patch, "static const uint BLOCK_SIZE = 256;",
-            "cumsum shader must launch exactly 256 invocations")
-    require(patch, "inclusiveWorkgroupScan",
-            "cumsum shader must use the shared-memory inclusive scan")
-    require(patch, "GroupMemoryBarrierWithGroupSync();",
-            "shared-memory scan requires workgroup barriers")
-    forbid(patch, "WavePrefixSum(",
-           "Android cumsum must not depend on the native subgroup width")
-    forbid(patch, "WaveReadLaneAt(",
-           "Android cumsum must not depend on subgroup lane reads")
-    require(patch, "num_blocks", "two-level cumsum must use reduced block count")
-    require(patch, "level1_uniforms", "three-level cumsum level 1 must use reduced count")
-    require(patch, "level2_uniforms", "three-level cumsum level 2 must use reduced count")
-    verify_cumsum_hierarchy()
+    # Pixel 10a cumsum must not create or execute a cumsum compute pipeline. The prior subgroup
+    # implementation produced wrong totals, and the replacement Slang shared-memory pipeline caused
+    # CRASH_NATIVE during vkCreateComputePipelines on Mali-G715.
+    require(patch, "CPU prefix scan", "Android cumsum patch must document the CPU scan")
+    require(patch, "copyFromDevice(input_buffer);",
+            "CPU cumsum must read the projected counts back from Vulkan")
+    require(patch, "int64_t running = 0;",
+            "CPU cumsum must accumulate without int32 intermediate overflow")
+    require(patch, "copyToDevice(output_buffer);",
+            "CPU cumsum must upload inclusive offsets for downstream Vulkan kernels")
+    require(patch, "buffers.index_buffer_offset.back()",
+            "tile-index count must come from the already computed CPU prefix value")
+    require(patch, "Do not create cumsum Vulkan pipelines",
+            "cumsum pipeline creation must stay disabled on Android")
+    verify_cpu_cumsum_reference()
 
     patch_pos = prepare.find("python3 scripts/patch-vksplat-cumsum-android.py")
     compile_pos = prepare.find("python3 compile_shaders.py")
     if patch_pos < 0 or compile_pos < 0 or patch_pos >= compile_pos:
         raise SystemExit(
-            "mobile architecture check failed: cumsum source patch must run before shader compilation")
+            "mobile architecture check failed: VkSplat renderer patch must run before final backend build")
 
     if VENDORED_RENDERER.is_file():
         renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
-        require(renderer, "const size_t block = 256;",
-                "prepared renderer is not using fixed shared256 cumsum geometry")
-        require(renderer, "if (num_elements <= block)",
-                "single-pass cumsum threshold must match its 256-thread shader")
-        require(renderer, "block_uniforms", "prepared VkSplat backend is missing cumsum fix")
-        require(renderer, "level1_uniforms", "prepared VkSplat backend is missing level-1 bounds")
-        require(renderer, "level2_uniforms", "prepared VkSplat backend is missing level-2 bounds")
-
-    if VENDORED_CUMSUM.is_file():
-        cumsum = VENDORED_CUMSUM.read_text(encoding="utf-8")
-        require(cumsum, "static const uint BLOCK_SIZE = 256;",
-                "prepared cumsum shader does not use the fixed 256-thread workgroup")
-        require(cumsum, "inclusiveWorkgroupScan",
-                "prepared cumsum shader is missing the shared-memory scan")
-        require(cumsum, "groupshared int32_t s_data[BLOCK_SIZE];",
-                "prepared cumsum shader is missing shared scan storage")
-        forbid(cumsum, "WavePrefixSum(",
-               "prepared cumsum shader still depends on subgroup prefix operations")
-        forbid(cumsum, "WaveReadLaneAt(",
-               "prepared cumsum shader still depends on subgroup lane operations")
-        forbid(cumsum, "SUBGROUP_SIZE",
-               "prepared cumsum shader must not encode a subgroup width")
-        forbid(cumsum, "return;",
-               "no cumsum invocation may exit before a workgroup barrier")
+        forbid(renderer, "createComputePipeline(pipeline_cumsum.",
+               "prepared renderer still creates the Pixel-crashing cumsum compute pipeline")
+        require(renderer, "copyFromDevice(input_buffer);",
+                "prepared renderer is missing CPU cumsum device readback")
+        require(renderer, "copyToDevice(output_buffer);",
+                "prepared renderer is missing CPU cumsum device upload")
+        require(renderer, "buffers.index_buffer_offset.back()",
+                "prepared renderer still re-reads cumsum total from the GPU")
+        start = renderer.find("void VulkanGSRenderer::executeCumsum(")
+        end = renderer.find("void VulkanGSRenderer::executeCalculateIndexBufferOffset(", start)
+        if start < 0 or end < 0:
+            raise SystemExit("mobile architecture check failed: prepared cumsum function not found")
+        cumsum_fn = renderer[start:end]
+        forbid(cumsum_fn, "executeCompute(",
+               "prepared Android cumsum must not dispatch a compute shader")
+        require(cumsum_fn, "int64_t running = 0;",
+                "prepared Android cumsum must use exact host accumulation")
 
     print("PCS continuous scanner + mobile trainer architecture checks passed")
 
