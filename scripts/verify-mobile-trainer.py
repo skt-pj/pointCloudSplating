@@ -165,17 +165,21 @@ def main() -> None:
     require(patch, "level2_uniforms", "three-level cumsum must pass level-2 element count")
     require(patch, "GPU cumsum self-test begin block=256",
             "renderer must run a cumsum self-test before training")
+    require(patch, "GPU cumsum self-test dispatch n=%zu",
+            "self-test must expose the exact workload being executed")
     require(patch, "37635, 90000",
             "self-test must cover the observed two-level and three-level Pixel workloads")
     require(patch, "GPU cumsum self-test FAIL",
             "self-test mismatch details must be logged")
+    require(patch, "DEVICE_GUARD;\n                executeCumsum(pcsTestBuffers",
+            "self-test cumsum must enter VkSplat command recording before PerfTimer timestamps")
     forbid(patch, "CPU prefix scan", "CPU cumsum workaround returned")
     forbid(patch, "copyFromDevice(input_buffer);", "renderer cumsum must remain GPU-side")
     verify_cumsum_hierarchy()
 
     require(cumsum_glsl, "#version 450", "Android cumsum must be Vulkan GLSL")
     require(cumsum_glsl, "#define PCS_BLOCK_SIZE 256", "GLSL cumsum local size changed")
-    require(cumsum_glsl, "layout(local_size_x = PCS_BLOCK_SIZE", "GLSL local workgroup missing")
+    require(cumsum_glsl, "layout(local_size_x = PCS_BLOCK_SIZE", "GLSL cumsum local workgroup missing")
     require(cumsum_glsl, "shared int sData[PCS_BLOCK_SIZE]", "GLSL cumsum needs workgroup storage")
     require(cumsum_glsl, "barrier();", "GLSL cumsum needs workgroup synchronization")
     require(cumsum_glsl, "inclusiveWorkgroupScan", "GLSL cumsum scan implementation missing")
@@ -225,6 +229,13 @@ def main() -> None:
         require(renderer, "level2_uniforms", "prepared renderer is missing level-2 bounds")
         require(renderer, "GPU cumsum self-test COMPLETE",
                 "prepared renderer is missing runtime GPU cumsum self-test")
+        self_test_start = renderer.find('PCS_CUMSUM_LOGI("GPU cumsum self-test begin block=256")')
+        self_test_end = renderer.find('PCS_CUMSUM_LOGI("GPU cumsum self-test COMPLETE")', self_test_start)
+        if self_test_start < 0 or self_test_end < 0:
+            raise SystemExit("mobile architecture check failed: prepared cumsum self-test not found")
+        self_test = renderer[self_test_start:self_test_end]
+        require(self_test, "DEVICE_GUARD;\n                executeCumsum(pcsTestBuffers",
+                "prepared self-test calls cumsum before a command batch is recording")
         start = renderer.find("void VulkanGSRenderer::executeCumsum(")
         end = renderer.find("void VulkanGSRenderer::executeCalculateIndexBufferOffset(", start)
         if start < 0 or end < 0:
