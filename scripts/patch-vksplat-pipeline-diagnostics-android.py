@@ -55,3 +55,8 @@ runpy.run_path("scripts/patch-vksplat-command-batch-android.py", run_name="__mai
 # Persist the full trainable state after successful PLY output so later runs continue from the
 # exact Gaussian parameters, Adam moments, RNG state and cumulative optimizer step.
 runpy.run_path("scripts/patch-vksplat-checkpoint-android.py", run_name="__main__")
+
+# Existing PCS models from builds before resumable checkpoints still contain the converged Gaussian
+# parameters in splat.ply. Import those exact parameters once, initialize only the unavailable Adam
+# moments, then publish a v2 checkpoint so every later run is an exact optimizer-state continuation.
+runpy.run_path("scripts/patch-vksplat-legacy-resume-android.py", run_name="__main__")
