@@ -38,20 +38,21 @@ def verify_cumsum_hierarchy() -> None:
     assert block == 256
     assert block // subgroup == subgroup
 
-    sizes = [1, 16, 17, 256, 257, 1024, 1025, 59_218, 87_777, 1_048_576]
+    sizes = [1, 16, 17, 256, 257, 1024, 1025, 37_635, 59_218, 87_777, 1_048_576]
     for n in sizes:
-        if n <= 1024:
+        if n <= block:
             continue
         level1_alloc = ceil_div(n, block)
         if n <= block * block:
             scan_uniform = level1_alloc
             assert scan_uniform <= block
-            assert scan_uniform <= level1_alloc
             continue
         if n <= block * block * block:
             level2_alloc = ceil_div(level1_alloc, block)
             assert level2_alloc <= block
-            assert level1_alloc <= level1_alloc
+            assert level1_alloc > block
+            continue
+        raise AssertionError(f"test size exceeds supported three-level hierarchy: {n}")
 
 
 def main() -> None:
@@ -145,6 +146,8 @@ def main() -> None:
     require(java, "BASE_TRAIN_STEPS = 750", "mobile schedule baseline changed unexpectedly")
     require(java, "MAX_TRAIN_STEPS = 1_000", "mobile schedule must remain bounded")
     require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
+    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_cumsum256_v2"',
+            "patched cumsum shaders must use a fresh on-device cache generation")
     forbid(java, "DEFAULT_TRAIN_STEPS = 6_000", "desktop-length training schedule returned")
 
     m = re.search(r"MAX_TRAIN_STEPS\s*=\s*([\d_]+)", java)
@@ -154,6 +157,8 @@ def main() -> None:
     # Mali subgroup-16 VkSplat cumsum invariants.
     require(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
             "renderer cumsum block replacement must use subgroup squared")
+    require(patch, "static const uint BLOCK_SIZE_0 = SUBGROUP_SIZE*SUBGROUP_SIZE;",
+            "shader physical workgroup must match the 256-element renderer block")
     require(patch, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
             "shader cumsum block replacement must use subgroup squared")
     require(patch, "if (laneId >= offset) {",
@@ -181,6 +186,10 @@ def main() -> None:
 
     if VENDORED_CUMSUM.is_file():
         cumsum = VENDORED_CUMSUM.read_text(encoding="utf-8")
+        require(cumsum, "static const uint BLOCK_SIZE_0 = SUBGROUP_SIZE*SUBGROUP_SIZE;",
+                "prepared shader still launches 1024 invocations for a 256-element block")
+        forbid(cumsum, "static const uint BLOCK_SIZE_0 = 1024;",
+               "prepared shader still contains the divergent 1024-thread workgroup")
         require(cumsum, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
                 "prepared cumsum shader does not bound block to one subgroup of subgroup sums")
         forbid(cumsum, "SUBGROUP_SIZE*SUBGROUP_SIZE*SUBGROUP_SIZE)",
