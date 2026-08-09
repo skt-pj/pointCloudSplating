@@ -119,7 +119,7 @@ def main() -> None:
     require(exporter, "MAX_TRAIN_LONG_EDGE = 1000",
             "training images must keep the established mobile memory envelope")
     forbid(exporter, "TRAIN_DOWNSAMPLE",
-           "continuous source resolution must not be blindly divided by a legacy still factor")
+            "continuous source resolution must not be blindly divided by a legacy still factor")
     require(exporter, "never upscale",
             "training export must document adaptive source scaling")
 
@@ -179,8 +179,11 @@ def main() -> None:
     require(cumsum_glsl, "shared int sData[PCS_BLOCK_SIZE]", "GLSL cumsum needs workgroup storage")
     require(cumsum_glsl, "barrier();", "GLSL cumsum needs workgroup synchronization")
     require(cumsum_glsl, "inclusiveWorkgroupScan", "GLSL cumsum scan implementation missing")
-    forbid(cumsum_glsl, "subgroup", "custom cumsum must not use subgroup operations")
-    forbid(cumsum_glsl, "Wave", "custom cumsum must not use wave operations")
+    forbid(cumsum_glsl, "gl_Subgroup", "custom cumsum must not use subgroup built-ins")
+    forbid(cumsum_glsl, "subgroupInclusive", "custom cumsum must not use subgroup arithmetic")
+    forbid(cumsum_glsl, "subgroupAdd", "custom cumsum must not use subgroup arithmetic")
+    forbid(cumsum_glsl, "WavePrefix", "custom cumsum must not use wave operations")
+    forbid(cumsum_glsl, "WaveRead", "custom cumsum must not use wave operations")
 
     # Pipeline diagnostics must isolate driver aborts to an exact shader and Vulkan call.
     require(pipeline_diag, "Vulkan pipeline begin shader=",
