@@ -14,6 +14,12 @@ header = header.replace(old_field, new_field, 1)
 header_path.write_text(header)
 
 source = source_path.read_text()
+include_anchor = '''#include <system_error>\n'''
+include_replacement = '''#include <system_error>\n#include <array>\n#include <cmath>\n#include <cstring>\n#include <cstdint>\n'''
+if include_anchor not in source:
+    raise SystemExit("legacy resume explicit includes anchor not found")
+source = source.replace(include_anchor, include_replacement, 1)
+
 old_load = '''    training_checkpoint_path = config.output_dir + "/3dgs_checkpoint.bin";\n    resume_training_step = 0;\n'''
 new_load = '''    training_checkpoint_path = config.output_dir + "/3dgs_checkpoint.bin";\n    legacy_training_ply_path = config.output_ply;\n    resume_training_step = 0;\n'''
 if old_load not in source:
