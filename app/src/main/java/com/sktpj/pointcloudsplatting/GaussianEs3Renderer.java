@@ -268,7 +268,10 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                 + cameraDistance * cosPitch * (float) Math.cos(yawRad);
 
         if (sortedUploadDirty) {
-            uploadSortedInstances(current, eyeX, eyeY, eyeZ);
+            uploadSortedInstances(
+                    current,
+                    eyeX, eyeY, eyeZ,
+                    cameraTargetX, cameraTargetY, cameraTargetZ);
             sortedUploadDirty = false;
         }
 
@@ -353,7 +356,10 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         GLES30.glDisableVertexAttribArray(location);
     }
 
-    private void uploadSortedInstances(GaussianModel current, float eyeX, float eyeY, float eyeZ) {
+    private void uploadSortedInstances(
+            GaussianModel current,
+            float eyeX, float eyeY, float eyeZ,
+            float cameraTargetX, float cameraTargetY, float cameraTargetZ) {
         int count = current.gaussianCount;
         int neededFloats = count * INSTANCE_FLOATS;
         if (uploadBuffer == null || uploadBuffer.capacity() < neededFloats) {
@@ -361,11 +367,15 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         }
         uploadBuffer.clear();
 
-        float eyeLen = (float) Math.sqrt(eyeX * eyeX + eyeY * eyeY + eyeZ * eyeZ);
-        float invEye = eyeLen > 1e-6f ? 1f / eyeLen : 1f;
-        float forwardX = -eyeX * invEye;
-        float forwardY = -eyeY * invEye;
-        float forwardZ = -eyeZ * invEye;
+        float forwardX = cameraTargetX - eyeX;
+        float forwardY = cameraTargetY - eyeY;
+        float forwardZ = cameraTargetZ - eyeZ;
+        float forwardLen = (float) Math.sqrt(
+                forwardX * forwardX + forwardY * forwardY + forwardZ * forwardZ);
+        float invForward = forwardLen > 1e-6f ? 1f / forwardLen : 1f;
+        forwardX *= invForward;
+        forwardY *= invForward;
+        forwardZ *= invForward;
 
         int[] indices = new int[count];
         float[] depths = new float[count];
