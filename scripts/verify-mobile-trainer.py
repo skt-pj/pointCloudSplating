@@ -11,34 +11,32 @@ JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTra
 JOB = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java"
 LIBRARY = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java"
 DIAGNOSTIC = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DiagnosticLog.java"
-TOMBSTONE_PARSER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeTombstoneParser.java"
+TOMBSTONE = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeTombstoneParser.java"
 SCANNER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ScannerActivity.java"
 CAPTURE = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetCaptureManager.java"
-CAMERA_CONFIG = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/CameraConfigSelector.java"
+CAMERA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/CameraConfigSelector.java"
 FINALIZER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinalizer.java"
 EXPORTER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ColmapDatasetExporter.java"
 MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
 RADIX_PATCH = ROOT / "scripts/patch-vksplat-radix-android.py"
 CHECKPOINT_PATCH = ROOT / "scripts/patch-vksplat-checkpoint-android.py"
-PIPELINE_DIAG_PATCH = ROOT / "scripts/patch-vksplat-pipeline-diagnostics-android.py"
+LEGACY_PATCH = ROOT / "scripts/patch-vksplat-legacy-resume-android.py"
+HINT_PATCH = ROOT / "scripts/patch-vksplat-legacy-resume-hint-android.py"
+PIPELINE_PATCH = ROOT / "scripts/patch-vksplat-pipeline-diagnostics-android.py"
 CUMSUM_GLSL = ROOT / "scripts/vksplat-android-shaders/cumsum.comp"
 PREPARE = ROOT / "scripts/prepare-vksplat-android.sh"
-VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
-VENDORED_PIPELINE = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_pipeline.cpp"
-VENDORED_TRAINER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_trainer.cpp"
-VENDORED_TRAINER_HEADER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_trainer.h"
-VENDORED_RADIX = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/shader/radix_sort"
+VENDORED = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat"
 
 
-def require(text: str, needle: str, reason: str) -> None:
+def require(text: str, needle: str, why: str) -> None:
     if needle not in text:
-        raise SystemExit(f"mobile architecture check failed: {reason}: missing {needle!r}")
+        raise SystemExit(f"mobile architecture check failed: {why}: missing {needle!r}")
 
 
-def forbid(text: str, needle: str, reason: str) -> None:
+def forbid(text: str, needle: str, why: str) -> None:
     if needle in text:
-        raise SystemExit(f"mobile architecture check failed: {reason}: found {needle!r}")
+        raise SystemExit(f"mobile architecture check failed: {why}: found {needle!r}")
 
 
 def ceil_div(n: int, d: int) -> int:
@@ -50,225 +48,207 @@ def verify_cumsum_hierarchy() -> None:
     for n in [1, 16, 255, 256, 257, 1024, 1025, 37_635, 90_000, 120_000, 1_048_576]:
         if n <= block:
             continue
-        level1 = ceil_div(n, block)
+        l1 = ceil_div(n, block)
         if n <= block * block:
-            assert level1 <= block
+            assert l1 <= block
         elif n <= block * block * block:
-            level2 = ceil_div(level1, block)
-            assert level1 > block and level2 <= block
+            assert l1 > block and ceil_div(l1, block) <= block
         else:
-            raise AssertionError(f"test size exceeds supported hierarchy: {n}")
+            raise AssertionError(n)
 
 
 def spirv_local_size(path: Path) -> tuple[int, int, int]:
     raw = path.read_bytes()
-    if len(raw) < 20 or len(raw) % 4 != 0:
-        raise SystemExit(f"mobile architecture check failed: invalid SPIR-V size: {path}")
-    words = struct.unpack(f"<{len(raw) // 4}I", raw)
+    if len(raw) < 20 or len(raw) % 4:
+        raise SystemExit(f"invalid SPIR-V size: {path}")
+    words = struct.unpack(f"<{len(raw)//4}I", raw)
     if words[0] != 0x07230203:
-        raise SystemExit(f"mobile architecture check failed: invalid SPIR-V header: {path}")
+        raise SystemExit(f"invalid SPIR-V magic: {path}")
     i = 5
     while i < len(words):
-        first = words[i]
-        word_count = first >> 16
-        opcode = first & 0xffff
-        if word_count == 0 or i + word_count > len(words):
+        wc = words[i] >> 16
+        op = words[i] & 0xffff
+        if wc == 0 or i + wc > len(words):
             break
-        if opcode == 16 and word_count >= 6 and words[i + 2] == 17:
+        if op == 16 and wc >= 6 and words[i + 2] == 17:
             return words[i + 3], words[i + 4], words[i + 5]
-        i += word_count
-    raise SystemExit(f"mobile architecture check failed: SPIR-V LocalSize missing: {path}")
+        i += wc
+    raise SystemExit(f"SPIR-V LocalSize missing: {path}")
 
 
 def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
-    cumsum_selftest = CUMSUM_SELFTEST.read_text(encoding="utf-8")
+    selftest = CUMSUM_SELFTEST.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
     java = JAVA.read_text(encoding="utf-8")
     job = JOB.read_text(encoding="utf-8")
     library = LIBRARY.read_text(encoding="utf-8")
     diagnostic = DIAGNOSTIC.read_text(encoding="utf-8")
-    tombstone_parser = TOMBSTONE_PARSER.read_text(encoding="utf-8")
+    tombstone = TOMBSTONE.read_text(encoding="utf-8")
     scanner = SCANNER.read_text(encoding="utf-8")
     capture = CAPTURE.read_text(encoding="utf-8")
-    camera_config = CAMERA_CONFIG.read_text(encoding="utf-8")
+    camera = CAMERA.read_text(encoding="utf-8")
     finalizer = FINALIZER.read_text(encoding="utf-8")
     exporter = EXPORTER.read_text(encoding="utf-8")
     manifest = MANIFEST.read_text(encoding="utf-8")
     cumsum_patch = CUMSUM_PATCH.read_text(encoding="utf-8")
     radix_patch = RADIX_PATCH.read_text(encoding="utf-8")
     checkpoint_patch = CHECKPOINT_PATCH.read_text(encoding="utf-8")
-    pipeline_diag = PIPELINE_DIAG_PATCH.read_text(encoding="utf-8")
+    legacy_patch = LEGACY_PATCH.read_text(encoding="utf-8")
+    hint_patch = HINT_PATCH.read_text(encoding="utf-8")
+    pipeline_patch = PIPELINE_PATCH.read_text(encoding="utf-8")
     cumsum_glsl = CUMSUM_GLSL.read_text(encoding="utf-8")
     prepare = PREPARE.read_text(encoding="utf-8")
 
-    # Camera/capture invariants: 3DGS work must never regress the scanner path.
-    require(scanner, "continuousCpuOnly=true", "continuous SharedCamera must use ARCore-only surfaces")
-    forbid(scanner, "sessionSurfaces.add(jpegReader.getSurface())", "legacy JPEG surface must stay out of continuous capture")
-    require(scanner, "surfaceView.setPreserveEGLContextOnPause(true)", "normal scan pauses must preserve EGL")
-    require(scanner, "releaseGlForModel", "model processing must explicitly release camera GL")
-    require(scanner, 'append("lastModelError=")', "model failures must remain in diagnostics")
-    require(capture, "frame.acquireCameraImage()", "RGB must come from the current ARCore frame")
-    require(capture, '"arcore_cpu_yuv_continuous"', "saved RGB source must stay explicit")
-    require(capture, 'quality.put("motion_is_hard_gate", false)', "motion must rank rather than gate")
-    require(capture, "calculateSharpness", "keyframe selection must measure sharpness")
-    require(capture, "flushBestCandidateLocked", "selection windows must retain only the best candidate")
-    require(capture, "SELECTION_WINDOW_NS = 750_000_000L", "selection window must remain 750ms")
-    forbid(capture, "NEW_WINDOW_TRANSLATION_METERS", "movement must not close selection windows")
-    forbid(capture, "NEW_WINDOW_ROTATION_DEGREES", "rotation must not close selection windows")
-    require(camera_config, "MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L", "continuous CPU resolution budget changed")
-    require(finalizer, "if(capture==null)return null;", "ARCore frames must not be remapped as Camera2 stills")
-    require(finalizer, '"arcore_image_intrinsics"', "ARCore intrinsics must be retained")
-    require(exporter, "MAX_TRAIN_LONG_EDGE = 1000", "mobile training memory envelope changed")
-    forbid(exporter, "TRAIN_DOWNSAMPLE", "legacy blind downsample returned")
+    # Scanner invariants: 3DGS changes must not alter capture behavior.
+    require(scanner, "continuousCpuOnly=true", "continuous SharedCamera must stay ARCore-only")
+    forbid(scanner, "sessionSurfaces.add(jpegReader.getSurface())", "legacy JPEG surface returned")
+    require(scanner, "surfaceView.setPreserveEGLContextOnPause(true)", "normal scan pause must preserve EGL")
+    require(scanner, "releaseGlForModel", "model processing must explicitly release GL")
+    require(scanner, 'append("lastModelError=")', "model error diagnostics missing")
+    require(capture, "frame.acquireCameraImage()", "RGB must come from ARCore CPU frames")
+    require(capture, '"arcore_cpu_yuv_continuous"', "continuous RGB source marker missing")
+    require(capture, 'quality.put("motion_is_hard_gate", false)', "motion must not become a hard gate")
+    require(capture, "calculateSharpness", "sharpness ranking missing")
+    require(capture, "flushBestCandidateLocked", "selection-window best-frame logic missing")
+    require(capture, "SELECTION_WINDOW_NS = 750_000_000L", "750ms selection window changed")
+    forbid(capture, "NEW_WINDOW_TRANSLATION_METERS", "movement-triggered window closure returned")
+    forbid(capture, "NEW_WINDOW_ROTATION_DEGREES", "rotation-triggered window closure returned")
+    require(camera, "MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L", "continuous CPU resolution budget changed")
+    require(finalizer, "if(capture==null)return null;", "ARCore frames must not be Camera2-remapped")
+    require(finalizer, '"arcore_image_intrinsics"', "ARCore intrinsics marker missing")
+    require(exporter, "MAX_TRAIN_LONG_EDGE = 1000", "mobile training image envelope changed")
+    forbid(exporter, "TRAIN_DOWNSAMPLE", "legacy blind training downsample returned")
     require(exporter, "never upscale", "adaptive export must never upscale")
     require(manifest, 'android:icon="@mipmap/ic_launcher"', "launcher icon missing")
 
-    # Core mobile trainer semantics.
-    require(native, "TrainerConfig::Strategy::MCMC", "density control must remain MCMC")
+    # Mobile 3DGS semantics.
+    require(native, "TrainerConfig::Strategy::MCMC", "MCMC density control missing")
     require(native, "kGaussianBudget = 120'000", "Gaussian budget changed")
     require(native, "kNormalNeighbors = 16", "surface normal K changed")
     require(native, "kScaleNeighbors = 3", "surface scale K changed")
-    require(native, "validateProjectionInvariants", "projection invariants must remain checked")
-    require(native, "cpuTiles=", "prefix mismatch must remain observable")
-    require(native, "kTileWorkingSetBudgetBytes", "tile working set must remain budgeted")
-    forbid(native, "executeDefaultPostBackward(", "desktop Default densification is not allowed")
+    require(native, "validateProjectionInvariants", "projection invariant checks missing")
+    require(native, "cpuTiles=", "prefix mismatch evidence missing")
+    require(native, "kTileWorkingSetBudgetBytes", "tile working-set budget missing")
+    forbid(native, "executeDefaultPostBackward(", "desktop default densification returned")
 
-    # Training iterations are user-controlled. 1000 is a default, not a quality ceiling.
+    # User chooses iterations; 1000 is not a hard ceiling.
     require(java, "BASE_TRAIN_STEPS = 750", "first-run default changed unexpectedly")
-    forbid(java, "MAX_TRAIN_STEPS", "old 1000-step quality ceiling returned")
-    require(java, "int requestedSteps", "trainer needs explicit requested steps")
-    require(java, "requestedSteps <= 0", "requested steps must be validated")
-    require(java, 'result.put("resumable_training", true)', "result must advertise continuation")
-    require(java, 'result.put("checkpoint_state", "gaussians+adam+rng+step")', "checkpoint contents must be documented")
+    forbid(java, "MAX_TRAIN_STEPS", "1000-step product ceiling returned")
+    require(java, "int requestedSteps", "explicit user step count missing")
+    require(java, "requestedSteps <= 0", "step validation missing")
+    require(java, 'result.put("resumable_training", true)', "resumable metadata missing")
+    require(java, 'result.put("checkpoint_state", "gaussians+adam+rng+step")', "checkpoint contents metadata missing")
     require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6"', "shader cache generation changed")
-    require(java, "nativeCumsumSelfTest", "cumsum self-test gate is required")
+    require(java, "nativeCumsumSelfTest", "isolated cumsum gate missing")
     forbid(java, "cumsum=cpu_scan", "CPU cumsum fallback returned")
 
-    # Native continuation must resume the true trainable state and report cumulative progress.
-    require(native, "trainer.restoreTrainingCheckpoint(buffers)", "native resume is missing")
-    require(native, "trainer.getResumeTrainingStep()", "cumulative resume step is missing")
-    require(native, "completedBeforeRun", "previous cumulative step is not retained")
-    require(native, "targetStep", "cumulative progress target is missing")
-    require(native, "getCompletedTrainingSteps()", "persisted cumulative step is not verified")
-    require(native, "added_steps", "native result must report the extension size")
-    require(native, "resumed", "native result must identify resumed runs")
-    forbid(native, "std::max(300,", "custom runs must not be silently raised to 300 steps")
+    require(native, "trainer.restoreTrainingCheckpoint(buffers)", "native continuation restore missing")
+    require(native, "trainer.getResumeTrainingStep()", "cumulative resume step missing")
+    require(native, "targetStep", "cumulative target missing")
+    require(native, "getCompletedTrainingSteps()", "persisted total-step verification missing")
+    require(native, "added_steps", "extension length missing from native result")
+    forbid(native, "std::max(300,", "custom runs must not be silently raised to 300")
 
-    require(job, "continueTraining", "job needs an explicit continuation entry point")
-    require(job, "canContinueTraining", "legacy PLY-only models must be distinguished")
-    require(job, "previousSteps + additionalSteps", "continuation must verify cumulative growth")
-    require(job, "optimizerの学習状態", "legacy models must not be mislabeled as exact resumes")
-    require(library, 'more.setText("追加学習")', "completed models need an additional-training action")
-    require(library, "TRAINING_PRESETS = {300, 1_000, 3_000, 10_000}", "training presets are missing")
-    require(library, "showCustomTrainingInput", "arbitrary user step input is missing")
-    require(library, "Integer.MAX_VALUE", "custom steps must not have a small product cap")
+    require(job, "continueTraining", "explicit continuation job missing")
+    require(job, "canContinueTraining", "continuation capability missing")
+    require(job, "hasExactTrainingCheckpoint", "exact-vs-legacy continuation distinction missing")
+    require(job, "writeLegacyResumeHint", "legacy PLY migration path missing")
+    require(job, "previousSteps + additionalSteps", "cumulative continuation verification missing")
+    require(job, "LEGACY_PLY_MIGRATED", "legacy migration diagnostics missing")
+    require(library, 'more.setText("追加学習")', "completed-model continuation button missing")
+    require(library, "TRAINING_PRESETS = {300, 1_000, 3_000, 10_000}", "training presets missing")
+    require(library, "showCustomTrainingInput", "arbitrary step input missing")
+    require(library, "Integer.MAX_VALUE", "custom steps have an artificial small cap")
 
-    # Checkpoint = parameters + Adam moments + RNG + cumulative step, atomically published.
-    for needle, reason in [
-        ("restoreTrainingCheckpoint", "checkpoint restore patch missing"),
-        ("saveTrainingCheckpoint", "checkpoint save patch missing"),
-        ("g_xyz_ws", "Adam means moments missing"),
-        ("g_sh_coeffs_1", "Adam SH m1 missing"),
-        ("g_sh_coeffs_2", "Adam SH m2 missing"),
-        ("g_rotations", "Adam rotation moments missing"),
-        ("g_scales_opacs", "Adam scale/opacity moments missing"),
-        ("rng_out << rng", "MCMC RNG save missing"),
-        ("rng_in >> rng", "MCMC RNG restore missing"),
-        ("resume_training_step", "cumulative Adam step missing"),
-        ('training_checkpoint_path + ".tmp"', "temporary checkpoint file missing"),
-        ("std::filesystem::rename(temp_path, training_checkpoint_path", "atomic checkpoint publish missing"),
-        ("config.means_lr_final * scene_scale", "resume LR must not jump to its initial value"),
-    ]:
-        require(checkpoint_patch, needle, reason)
-    require(pipeline_diag, "patch-vksplat-checkpoint-android.py", "prepare must apply checkpoint patch")
+    # Full checkpoint and one-time legacy migration.
+    for needle in ["restoreTrainingCheckpoint", "saveTrainingCheckpoint", "g_xyz_ws",
+                   "g_sh_coeffs_1", "g_sh_coeffs_2", "g_rotations", "g_scales_opacs",
+                   "rng_out << rng", "rng_in >> rng", 'training_checkpoint_path + ".tmp"',
+                   "std::filesystem::rename(temp_path, training_checkpoint_path"]:
+        require(checkpoint_patch, needle, "full optimizer checkpoint is incomplete")
+    require(legacy_patch, "importLegacyTrainingPly", "legacy PLY importer missing")
+    require(legacy_patch, "resume_optimizer_step", "legacy Adam-age separation missing")
+    require(legacy_patch, "completed_optimizer_step", "optimizer age is not persisted")
+    require(legacy_patch, "buffers.g_xyz_ws.assign(2 * 3 * n, 0.0f)", "legacy Adam reset missing")
+    require(legacy_patch, "total_training_step = resume_training_step + local_step", "legacy total-step continuation missing")
+    require(legacy_patch, "global_step = resume_optimizer_step + local_step", "legacy Adam bias age is wrong")
+    require(hint_patch, '"legacy_resume_step.txt"', "legacy migration hint bridge missing")
+    require(hint_patch, "return importLegacyTrainingPly", "legacy hint does not trigger PLY import")
+    require(pipeline_patch, "patch-vksplat-checkpoint-android.py", "checkpoint patch is not wired")
+    require(pipeline_patch, "patch-vksplat-legacy-resume-android.py", "legacy importer is not wired")
+    require(pipeline_patch, "patch-vksplat-legacy-resume-hint-android.py", "legacy hint bridge is not wired")
 
-    # Cumsum remains fixed 256-thread subgroup-independent Vulkan code.
+    # Cumsum remains subgroup-independent and radix remains Pixel/Mali subgroup-16 safe.
     require(cumsum_patch, "const size_t block = 256;", "cumsum block size changed")
-    require(cumsum_patch, "level1_uniforms", "three-level cumsum L1 bounds missing")
-    require(cumsum_patch, "level2_uniforms", "three-level cumsum L2 bounds missing")
-    require(cumsum_patch, 'spirv_paths.at("cumsum_single_pass"), 0, false', "cumsum fixed subgroup request returned")
+    require(cumsum_patch, "level1_uniforms", "cumsum level-1 bounds missing")
+    require(cumsum_patch, "level2_uniforms", "cumsum level-2 bounds missing")
+    require(cumsum_patch, 'spirv_paths.at("cumsum_single_pass"), 0, false', "cumsum fixed-subgroup request returned")
     forbid(cumsum_patch, "CPU prefix scan", "CPU cumsum fallback returned")
     verify_cumsum_hierarchy()
-    require(cumsum_selftest, "class CumsumSelfTestRenderer final : public VulkanGSRenderer", "isolated cumsum renderer missing")
-    require(cumsum_selftest, "VulkanGSPipeline::initialize(deviceId)", "isolated Vulkan init missing")
-    require(cumsum_selftest, "executeCumsum(buffers, input, output)", "self-test must use production cumsum")
-    require(cumsum_selftest, "{1, 16, 255, 256, 257, 1024, 1025, 37635, 90000}", "cumsum boundary coverage changed")
-    forbid(cumsum_selftest, "VulkanGSTrainer", "cumsum test must remain isolated from trainer")
-    require(cmake, "cumsum_selftest.cpp", "cumsum self-test must be linked")
+    require(selftest, "class CumsumSelfTestRenderer final : public VulkanGSRenderer", "isolated cumsum renderer missing")
+    require(selftest, "executeCumsum(buffers, input, output)", "self-test must exercise production cumsum")
+    require(selftest, "{1, 16, 255, 256, 257, 1024, 1025, 37635, 90000}", "cumsum test coverage changed")
+    forbid(selftest, "VulkanGSTrainer", "cumsum self-test must stay independent of trainer")
+    require(cmake, "cumsum_selftest.cpp", "cumsum self-test is not linked")
     require(cumsum_glsl, "#define PCS_BLOCK_SIZE 256", "GLSL cumsum local size changed")
-    require(cumsum_glsl, "shared int sData[PCS_BLOCK_SIZE]", "GLSL cumsum workgroup storage missing")
-    forbid(cumsum_glsl, "gl_Subgroup", "cumsum must remain subgroup-independent")
-
-    # Mali radix remains subgroup-16 / 256-thread and NDK-glslc generated.
+    forbid(cumsum_glsl, "gl_Subgroup", "custom cumsum must stay subgroup-independent")
     require(radix_patch, '#define SUBGROUP_SIZE 16', "radix subgroup width changed")
     require(radix_patch, '#define WORKGROUP_SIZE 256', "radix workgroup size changed")
     require(radix_patch, 'SHMEM_SIZE = RADIX * (WORKGROUP_SIZE / SUBGROUP_SIZE)', "radix shared histogram sizing regressed")
-    require(radix_patch, 'subgroupBallotExclusiveBitCount(mask)', "radix exclusive ballot must be subgroup-width-safe")
-    require(radix_patch, 'subgroupBallotBitCount(mask)', "radix ballot must be subgroup-width-safe")
-    require(pipeline_diag, 'patch-vksplat-radix-android.py', "prepare must apply Mali radix patch")
+    require(radix_patch, 'subgroupBallotExclusiveBitCount(mask)', "radix subgroup ballot regressed")
 
-    # Crash evidence and pipeline diagnostics remain persistent.
+    # Persistent native failure evidence remains available.
     require(diagnostic, "PREF_LAST_NATIVE_TRACE_TIMESTAMP", "native tombstone cursor missing")
-    require(diagnostic, "exit.getTraceInputStream()", "native tombstones must be read")
-    require(diagnostic, "NativeTombstoneParser.parse(trace)", "native tombstones must be decoded")
-    require(tombstone_parser, "case 16:", "tombstone thread map missing")
-    require(tombstone_parser, "out.frames.add(parseFrame", "native backtrace frames missing")
-    require(pipeline_diag, "Vulkan pipeline begin shader=", "pipeline start diagnostics missing")
-    require(pipeline_diag, "Vulkan pipeline create begin shader=", "pipeline creation diagnostics missing")
-    require(pipeline_diag, "Vulkan pipeline ready shader=", "pipeline success diagnostics missing")
-    require(pipeline_diag, "maxWGInvocations=", "device workgroup diagnostics missing")
-    require(pipeline_diag, "Invalid SPIR-V header", "malformed SPIR-V validation missing")
+    require(diagnostic, "exit.getTraceInputStream()", "native tombstones are not read")
+    require(diagnostic, "NativeTombstoneParser.parse(trace)", "native tombstones are not decoded")
+    require(tombstone, "out.frames.add(parseFrame", "native backtrace frames missing")
+    require(pipeline_patch, "Vulkan pipeline create begin shader=", "pipeline diagnostics missing")
+    require(pipeline_patch, "maxWGInvocations=", "device workgroup diagnostics missing")
+    require(pipeline_patch, "Invalid SPIR-V header", "SPIR-V validation missing")
 
-    # Build must patch before compilation and validate generated Android shader geometry.
-    require(prepare, "PCS_CUMSUM_PHASE", "prepare must compile custom cumsum")
-    require(prepare, "spirv-val", "prepare must validate cumsum SPIR-V")
-    require(prepare, "LocalSize 256 1 1", "prepare must assert cumsum LocalSize")
+    # Preparation order and generated shader geometry.
     patch_pos = prepare.find("python3 scripts/patch-vksplat-cumsum-android.py")
     diag_pos = prepare.find("python3 scripts/patch-vksplat-pipeline-diagnostics-android.py")
     compile_pos = prepare.find("python3 compile_shaders.py")
     if min(patch_pos, diag_pos, compile_pos) < 0 or not (patch_pos < compile_pos and diag_pos < compile_pos):
-        raise SystemExit("mobile architecture check failed: VkSplat patches must run before shader/native build")
+        raise SystemExit("mobile architecture check failed: VkSplat patches must run before shader compilation")
 
-    if VENDORED_RENDERER.is_file():
-        renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
-        require(renderer, "const size_t block = 256;", "prepared renderer cumsum geometry regressed")
-        require(renderer, 'spirv_paths.at("cumsum_single_pass"), 0, false', "prepared cumsum subgroup request regressed")
+    renderer_path = VENDORED / "src/gs_renderer.cpp"
+    pipeline_path = VENDORED / "src/gs_pipeline.cpp"
+    trainer_path = VENDORED / "src/gs_trainer.cpp"
+    trainer_h_path = VENDORED / "src/gs_trainer.h"
+    radix_dir = VENDORED / "shader/radix_sort"
+    if renderer_path.is_file():
+        renderer = renderer_path.read_text(encoding="utf-8")
+        require(renderer, "const size_t block = 256;", "prepared cumsum geometry regressed")
+        require(renderer, 'spirv_paths.at("cumsum_single_pass"), 0, false', "prepared cumsum subgroup contract regressed")
         sort_start = renderer.find("void VulkanGSRenderer::executeSort(")
         if sort_start < 0:
-            raise SystemExit("mobile architecture check failed: prepared radix sort function missing")
-        require(renderer[sort_start:], "const int WORKGROUP_SIZE = 256;", "prepared radix C++ geometry regressed")
-
-    if VENDORED_PIPELINE.is_file():
-        pipeline = VENDORED_PIPELINE.read_text(encoding="utf-8")
-        require(pipeline, "Vulkan pipeline create begin shader=", "prepared pipeline diagnostics missing")
-        require(pipeline, "maxWGInvocations=", "prepared device diagnostics missing")
-
-    if VENDORED_TRAINER.is_file() and VENDORED_TRAINER_HEADER.is_file():
-        trainer = VENDORED_TRAINER.read_text(encoding="utf-8")
-        trainer_header = VENDORED_TRAINER_HEADER.read_text(encoding="utf-8")
-        require(trainer_header, "restoreTrainingCheckpoint", "prepared trainer restore API missing")
-        require(trainer_header, "completed_training_step", "prepared trainer cumulative step missing")
-        require(trainer, "Saved PCS 3DGS checkpoint", "prepared checkpoint save missing")
-        require(trainer, "Restored PCS 3DGS checkpoint", "prepared checkpoint restore missing")
-        require(trainer, "global_step = resume_training_step", "prepared Adam step is not cumulative")
-        require(trainer, "saveTrainingCheckpoint(buffers);", "PLY output does not save checkpoint")
-
-    if VENDORED_RADIX.is_dir():
-        radix_config = (VENDORED_RADIX / "config.glsl").read_text(encoding="utf-8")
-        radix_downsweep = (VENDORED_RADIX / "downsweep.comp").read_text(encoding="utf-8")
-        require(radix_config, "#define SUBGROUP_SIZE 16", "prepared radix subgroup width regressed")
-        require(radix_config, "#define WORKGROUP_SIZE 256", "prepared radix workgroup regressed")
-        require(radix_downsweep, "subgroupBallotExclusiveBitCount(mask)", "prepared radix ballot regressed")
+            raise SystemExit("prepared radix sort function missing")
+        require(renderer[sort_start:], "const int WORKGROUP_SIZE = 256;", "prepared radix geometry regressed")
+    if pipeline_path.is_file():
+        prepared_pipeline = pipeline_path.read_text(encoding="utf-8")
+        require(prepared_pipeline, "Vulkan pipeline create begin shader=", "prepared pipeline diagnostics missing")
+    if trainer_path.is_file() and trainer_h_path.is_file():
+        prepared_trainer = trainer_path.read_text(encoding="utf-8") + trainer_h_path.read_text(encoding="utf-8")
+        require(prepared_trainer, "restoreTrainingCheckpoint", "prepared checkpoint restore missing")
+        require(prepared_trainer, "importLegacyTrainingPly", "prepared legacy PLY importer missing")
+        require(prepared_trainer, "legacy_resume_step.txt", "prepared legacy hint bridge missing")
+        require(prepared_trainer, "resume_optimizer_step", "prepared optimizer-age separation missing")
+        require(prepared_trainer, "saveTrainingCheckpoint(buffers);", "prepared checkpoint save missing")
+    if radix_dir.is_dir():
+        cfg = (radix_dir / "config.glsl").read_text(encoding="utf-8")
+        down = (radix_dir / "downsweep.comp").read_text(encoding="utf-8")
+        require(cfg, "#define SUBGROUP_SIZE 16", "prepared radix subgroup width regressed")
+        require(cfg, "#define WORKGROUP_SIZE 256", "prepared radix workgroup regressed")
+        require(down, "subgroupBallotExclusiveBitCount(mask)", "prepared radix ballot regressed")
         for name in ("upsweep.spv", "spine.spv", "downsweep.spv"):
-            path = VENDORED_RADIX / name
-            if not path.is_file():
-                raise SystemExit(f"mobile architecture check failed: Android radix SPIR-V missing: {path}")
-            local = spirv_local_size(path)
-            if local != (256, 1, 1):
-                raise SystemExit(f"mobile architecture check failed: {name} LocalSize={local}, expected (256, 1, 1)")
+            path = radix_dir / name
+            if not path.is_file() or spirv_local_size(path) != (256, 1, 1):
+                raise SystemExit(f"prepared Android radix SPIR-V invalid: {path}")
 
-    print("PCS continuous scanner + resumable mobile trainer architecture checks passed")
+    print("PCS scanner + user-controlled resumable 3DGS architecture checks passed")
 
 
 if __name__ == "__main__":
