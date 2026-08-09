@@ -51,3 +51,7 @@ runpy.run_path("scripts/patch-vksplat-radix-android.py", run_name="__main__")
 # The command-batch patch depends on the Android log macros injected above, so keep the ordering
 # explicit in one entry point used by the build.
 runpy.run_path("scripts/patch-vksplat-command-batch-android.py", run_name="__main__")
+
+# Persist the full trainable state after successful PLY output so later runs continue from the
+# exact Gaussian parameters, Adam moments, RNG state and cumulative optimizer step.
+runpy.run_path("scripts/patch-vksplat-checkpoint-android.py", run_name="__main__")
