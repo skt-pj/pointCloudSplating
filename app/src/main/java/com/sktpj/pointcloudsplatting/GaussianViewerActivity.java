@@ -19,6 +19,7 @@ import java.io.File;
 /** OpenGL ES 3 viewer for final splat.ply or the explicitly non-final preview_splat.ply. */
 public final class GaussianViewerActivity extends Activity {
     public static final String EXTRA_DATASET_PATH = "dataset_path";
+    private static final int DEFAULT_DISPLAY_SIZE_PROGRESS = 75;
 
     private GLSurfaceView glView;
     private GaussianEs3Renderer renderer;
@@ -27,6 +28,10 @@ public final class GaussianViewerActivity extends Activity {
     private ScaleGestureDetector scaleDetector;
     private float lastX;
     private float lastY;
+    private float lastTwoFingerX;
+    private float lastTwoFingerY;
+    private boolean singleTouchReady;
+    private boolean twoTouchReady;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -71,7 +76,8 @@ public final class GaussianViewerActivity extends Activity {
                     }
                 });
         glView.setOnTouchListener(this::handleTouch);
-        glView.setContentDescription("3D表示。指一本で回転、二本指で拡大縮小できます");
+        glView.setContentDescription(
+                "3D表示。指一本で回転、二本指で平行移動、ピンチで拡大縮小できます");
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF101010);
@@ -113,13 +119,12 @@ public final class GaussianViewerActivity extends Activity {
         sizeLabel = new TextView(this);
         sizeLabel.setTextColor(0xFFFFFFFF);
         sizeLabel.setTextSize(14f);
-        sizeLabel.setText("表示サイズ: 最小");
+        sizeLabel.setText("表示サイズ: 標準 75%");
         sizePanel.addView(sizeLabel, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(24)));
 
         SeekBar sizeSlider = new SeekBar(this);
         sizeSlider.setMax(100);
-        sizeSlider.setProgress(0);
         sizeSlider.setMinHeight(dp(48));
         sizeSlider.setContentDescription("3D表示の粒の大きさ");
         sizeSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -134,6 +139,8 @@ public final class GaussianViewerActivity extends Activity {
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
+        renderer.setDisplaySizeProgress(DEFAULT_DISPLAY_SIZE_PROGRESS);
+        sizeSlider.setProgress(DEFAULT_DISPLAY_SIZE_PROGRESS);
         sizePanel.addView(sizeSlider, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
 
@@ -202,13 +209,106 @@ public final class GaussianViewerActivity extends Activity {
         }, "LoadGaussianPly").start();
     }
 
-    private boolean handleTouch(View view,MotionEvent event){
+    private boolean handleTouch(View view, MotionEvent event) {
         scaleDetector.onTouchEvent(event);
-        if(event.getPointerCount()==1&&!scaleDetector.isInProgress()){
-            if(event.getActionMasked()==MotionEvent.ACTION_DOWN){lastX=event.getX();lastY=event.getY();}
-            else if(event.getActionMasked()==MotionEvent.ACTION_MOVE){float x=event.getX(),y=event.getY();renderer.rotate((x-lastX)*0.35f,(y-lastY)*0.35f);lastX=x;lastY=y;}
+        int action = event.getActionMasked();
+        int pointerCount = event.getPointerCount();
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            lastX = event.getX(0);
+            lastY = event.getY(0);
+            singleTouchReady = true;
+            twoTouchReady = false;
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            if (pointerCount >= 2) {
+                lastTwoFingerX = centroidX(event, -1);
+                lastTwoFingerY = centroidY(event, -1);
+                twoTouchReady = true;
+                singleTouchReady = false;
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_MOVE) {
+            if (pointerCount >= 2) {
+                float centerX = centroidX(event, -1);
+                float centerY = centroidY(event, -1);
+                if (twoTouchReady) {
+                    renderer.pan(centerX - lastTwoFingerX, centerY - lastTwoFingerY);
+                }
+                lastTwoFingerX = centerX;
+                lastTwoFingerY = centerY;
+                twoTouchReady = true;
+                singleTouchReady = false;
+                return true;
+            }
+
+            if (pointerCount == 1) {
+                float x = event.getX(0);
+                float y = event.getY(0);
+                if (!scaleDetector.isInProgress() && singleTouchReady) {
+                    renderer.rotate(x - lastX, y - lastY);
+                }
+                lastX = x;
+                lastY = y;
+                singleTouchReady = !scaleDetector.isInProgress();
+                twoTouchReady = false;
+                return true;
+            }
+        }
+
+        if (action == MotionEvent.ACTION_POINTER_UP) {
+            int liftedIndex = event.getActionIndex();
+            int remaining = pointerCount - 1;
+            if (remaining >= 2) {
+                lastTwoFingerX = centroidX(event, liftedIndex);
+                lastTwoFingerY = centroidY(event, liftedIndex);
+                twoTouchReady = true;
+                singleTouchReady = false;
+            } else if (remaining == 1) {
+                int remainingIndex = liftedIndex == 0 ? 1 : 0;
+                lastX = event.getX(remainingIndex);
+                lastY = event.getY(remainingIndex);
+                singleTouchReady = true;
+                twoTouchReady = false;
+            } else {
+                singleTouchReady = false;
+                twoTouchReady = false;
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            singleTouchReady = false;
+            twoTouchReady = false;
+            return true;
         }
         return true;
+    }
+
+    private static float centroidX(MotionEvent event, int excludedIndex) {
+        float sum = 0f;
+        int count = 0;
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            if (i == excludedIndex) continue;
+            sum += event.getX(i);
+            count++;
+        }
+        return count == 0 ? 0f : sum / count;
+    }
+
+    private static float centroidY(MotionEvent event, int excludedIndex) {
+        float sum = 0f;
+        int count = 0;
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            if (i == excludedIndex) continue;
+            sum += event.getY(i);
+            count++;
+        }
+        return count == 0 ? 0f : sum / count;
     }
 
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
