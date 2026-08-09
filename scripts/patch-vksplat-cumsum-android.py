@@ -148,6 +148,17 @@ renderer_path.write_text(renderer)
 
 shader_path = Path("app/src/main/cpp/third_party/vksplat/vksplat/slang/cumsum.slang")
 shader = shader_path.read_text()
+
+# The renderer now dispatches 256 elements per workgroup on subgroup-16 Mali. The shader must have
+# the same physical workgroup size. Leaving numthreads at 1024 makes 768 invocations return before
+# GroupMemoryBarrierWithGroupSync(), which violates the workgroup barrier requirement and corrupts
+# the prefix sum on Pixel 10a.
+old_shader_threads = "    static const uint BLOCK_SIZE_0 = 1024;\n"
+new_shader_threads = "    static const uint BLOCK_SIZE_0 = SUBGROUP_SIZE*SUBGROUP_SIZE;\n"
+if old_shader_threads not in shader:
+    raise SystemExit("cumsum shader workgroup-size patch anchor not found")
+shader = shader.replace(old_shader_threads, new_shader_threads, 1)
+
 old_shader_block = "    #define BLOCK_SIZE min(BLOCK_SIZE_0, SUBGROUP_SIZE*SUBGROUP_SIZE*SUBGROUP_SIZE)\n"
 new_shader_block = "    #define BLOCK_SIZE min(BLOCK_SIZE_0, SUBGROUP_SIZE*SUBGROUP_SIZE)\n"
 if old_shader_block not in shader:
@@ -175,4 +186,4 @@ if old_subgroup_scan not in shader:
 shader = shader.replace(old_subgroup_scan, new_subgroup_scan, 1)
 shader_path.write_text(shader)
 
-print("Patched VkSplat cumsum for Android subgroup-16 correctness")
+print("Patched VkSplat cumsum for Android subgroup-16 with matched 256-thread workgroups")
