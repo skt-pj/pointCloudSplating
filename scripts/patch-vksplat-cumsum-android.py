@@ -4,274 +4,92 @@ from pathlib import Path
 renderer_path = Path("app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp")
 renderer = renderer_path.read_text()
 
-# Android uses a fixed 256-invocation cumsum workgroup. Do not derive cumsum geometry from
-# VkPhysicalDeviceSubgroupProperties: Mali subgroup width is an implementation detail and the
-# prefix sum must remain correct regardless of whether a driver exposes 16- or 32-lane subgroups.
-old_geometry = '''    const size_t block_0 = 1024;
-    const size_t block_limit = deviceInfo.subgroupSize*deviceInfo.subgroupSize*deviceInfo.subgroupSize;
-    const size_t block = std::min(block_0, block_limit);
+# Pixel 10a / Mali showed two independent failures in the pinned desktop cumsum path:
+# 1) the subgroup implementation returned deterministic wrong totals;
+# 2) a subgroup-independent Slang shared-memory replacement caused a native driver abort while
+#    creating the compute pipeline, before training started.
+#
+# Correctness is more important than keeping this small scan on the GPU. Android therefore uses a
+# CPU prefix scan for cumsum only. Projection/rasterization/loss/backward/optimizer remain Vulkan.
+# At the current 90k initial / 120k maximum Gaussian budget this transfers at most about 480 KiB in
+# each direction per scan and completely removes cumsum shader/subgroup/driver-compiler dependence.
+
+old_pipeline_init = '''    createComputePipeline(pipeline_cumsum.single_pass, spirv_paths.at("cumsum_single_pass"));
+    createComputePipeline(pipeline_cumsum.block_scan, spirv_paths.at("cumsum_block_scan"));
+    createComputePipeline(pipeline_cumsum.scan_block_sums, spirv_paths.at("cumsum_scan_block_sums"));
+    createComputePipeline(pipeline_cumsum.add_block_offsets, spirv_paths.at("cumsum_add_block_offsets"));
 '''
-new_geometry = '''    const size_t block = 256;
+new_pipeline_init = '''    // PCS Android: cumsum uses the CPU prefix scan below. Do not create cumsum Vulkan pipelines;
+    // Mali-G715 aborted inside compute-pipeline creation for the replacement shared-memory SPIR-V.
 '''
-if old_geometry not in renderer:
-    raise SystemExit("cumsum geometry patch anchor not found")
-renderer = renderer.replace(old_geometry, new_geometry, 1)
+if old_pipeline_init not in renderer:
+    raise SystemExit("cumsum pipeline-init patch anchor not found")
+renderer = renderer.replace(old_pipeline_init, new_pipeline_init, 1)
 
-old_single_pass = '''    if (num_elements <= block_0) {
-        executeCompute(
-            {{num_elements, block_0}},
+start_marker = '''void VulkanGSRenderer::executeCumsum(
 '''
-new_single_pass = '''    if (num_elements <= block) {
-        executeCompute(
-            {{num_elements, block}},
+end_marker = '''void VulkanGSRenderer::executeCalculateIndexBufferOffset(
 '''
-if old_single_pass not in renderer:
-    raise SystemExit("cumsum single-pass geometry patch anchor not found")
-renderer = renderer.replace(old_single_pass, new_single_pass, 1)
+start = renderer.find(start_marker)
+end = renderer.find(end_marker, start)
+if start < 0 or end < 0 or end <= start:
+    raise SystemExit("cumsum function patch anchors not found")
 
-old_two_level = '''        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        executeCompute(
-            {{num_elements/block, block}},
-            uniforms, uniform_size,
-            pipeline_cumsum.scan_block_sums,
-            {
-                input_buffer.deviceBuffer,
-                output_buffer.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-            }
-        );
-'''
-new_two_level = '''        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        const uint32_t num_blocks = (uint32_t)_CEIL_DIV(num_elements, block);
-        uint32_t block_uniforms[1] = { num_blocks };
-        executeCompute(
-            {{num_blocks, block}},
-            block_uniforms, uniform_size,
-            pipeline_cumsum.scan_block_sums,
-            {
-                input_buffer.deviceBuffer,
-                output_buffer.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-            }
-        );
-'''
-if old_two_level not in renderer:
-    raise SystemExit("two-level cumsum patch anchor not found")
-renderer = renderer.replace(old_two_level, new_two_level, 1)
+cpu_cumsum = r'''void VulkanGSRenderer::executeCumsum(
+    VulkanGSPipelineBuffers &buffers,
+    Buffer<int32_t> &input_buffer,
+    Buffer<int32_t> &output_buffer
+) {
+    PerfTimer::Timer<PerfTimer::_Cumsum> timer(this);
 
-old_three_level = '''        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        executeCompute(
-            {{num_elements/block, block}},
-            uniforms, uniform_size,
-            pipeline_cumsum.block_scan,
-            {
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums2.deviceBuffer,
-            }
-        );
-
-        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_READ_WRITE },
-            { buffers._cumsum_blockSums2.deviceBuffer, COMPUTE_SHADER_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        executeCompute(
-            {{num_elements_1/block, block}},
-            uniforms, uniform_size,
-            pipeline_cumsum.scan_block_sums,
-            {
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums2.deviceBuffer,
-            }
-        );
-
-        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums2.deviceBuffer, COMPUTE_SHADER_READ_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        executeCompute(
-            {{num_elements/block, block}},
-            uniforms, uniform_size,
-            pipeline_cumsum.add_block_offsets,
-            {
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums2.deviceBuffer,
-            }
-        );
-'''
-new_three_level = '''        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        uint32_t level1_uniforms[1] = { (uint32_t)num_elements_1 };
-        executeCompute(
-            {{num_elements_1, block}},
-            level1_uniforms, uniform_size,
-            pipeline_cumsum.block_scan,
-            {
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums2.deviceBuffer,
-            }
-        );
-
-        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums.deviceBuffer, COMPUTE_SHADER_READ_WRITE },
-            { buffers._cumsum_blockSums2.deviceBuffer, COMPUTE_SHADER_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        const size_t num_elements_2 = _CEIL_DIV(num_elements_1, block);
-        uint32_t level2_uniforms[1] = { (uint32_t)num_elements_2 };
-        executeCompute(
-            {{num_elements_2, block}},
-            level2_uniforms, uniform_size,
-            pipeline_cumsum.scan_block_sums,
-            {
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums2.deviceBuffer,
-            }
-        );
-
-        bufferMemoryBarrier({
-            { buffers._cumsum_blockSums2.deviceBuffer, COMPUTE_SHADER_READ_WRITE },
-        }, COMPUTE_SHADER_READ_WRITE);
-        executeCompute(
-            {{num_elements_1, block}},
-            level1_uniforms, uniform_size,
-            pipeline_cumsum.add_block_offsets,
-            {
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums.deviceBuffer,
-                buffers._cumsum_blockSums2.deviceBuffer,
-            }
-        );
-'''
-if old_three_level not in renderer:
-    raise SystemExit("three-level cumsum patch anchor not found")
-renderer = renderer.replace(old_three_level, new_three_level, 1)
-renderer_path.write_text(renderer)
-
-# Replace the pinned desktop-oriented wave/subgroup scan with a subgroup-independent workgroup
-# scan. All 256 invocations participate in every GroupMemoryBarrierWithGroupSync(). Partial blocks
-# are zero padded, so the final lane always carries the inclusive block sum.
-shader_path = Path("app/src/main/cpp/third_party/vksplat/vksplat/slang/cumsum.slang")
-shader_path.write_text(r'''#define CUMSUM_PHASE_blockScan 1
-#define CUMSUM_PHASE_scanBlockSums 2
-#define CUMSUM_PHASE_addBlockOffsets 3
-#define CUMSUM_PHASE_singlePassPrefixSum 0
-
-#ifndef CUMSUM_PHASE
-#define CUMSUM_PHASE -1
-#endif
-
-#if CUMSUM_PHASE == CUMSUM_PHASE_blockScan
-#define blockScan main
-#elif CUMSUM_PHASE == CUMSUM_PHASE_scanBlockSums
-#define scanBlockSums main
-#elif CUMSUM_PHASE == CUMSUM_PHASE_addBlockOffsets
-#define addBlockOffsets main
-#elif CUMSUM_PHASE == CUMSUM_PHASE_singlePassPrefixSum
-#define singlePassPrefixSum main
-#endif
-
-static const uint BLOCK_SIZE = 256;
-
-layout(binding=0) StructuredBuffer<int32_t> g_input;
-layout(binding=1) RWStructuredBuffer<int32_t> g_output;
-layout(binding=2) RWStructuredBuffer<int32_t> g_blockSums;
-
-groupshared int32_t s_data[BLOCK_SIZE];
-
-struct Uniforms {
-    uint32_t numElements;
-};
-
-void inclusiveWorkgroupScan(uint tid) {
-    [ForceUnroll]
-    for (uint offset = 1; offset < BLOCK_SIZE; offset <<= 1) {
-        int32_t addend = 0;
-        if (tid >= offset)
-            addend = s_data[tid - offset];
-        GroupMemoryBarrierWithGroupSync();
-        if (tid >= offset)
-            s_data[tid] += addend;
-        GroupMemoryBarrierWithGroupSync();
+    // PCS Android CPU prefix scan. copyFromDevice/copyToDevice use VkSplat's staging buffer and
+    // HostGuard, so an enclosing command batch is safely submitted, synchronized, and resumed.
+    const size_t num_elements = input_buffer.deviceSize();
+    if (num_elements == 0) {
+        output_buffer.clear();
+        output_buffer.deviceBuffer.size = 0;
+        return;
     }
+
+    copyFromDevice(input_buffer);
+    if (input_buffer.size() != num_elements)
+        _THROW_ERROR("CPU cumsum input size changed during device readback");
+
+    output_buffer.resize(num_elements);
+    int64_t running = 0;
+    for (size_t i = 0; i < num_elements; ++i) {
+        running += static_cast<int64_t>(input_buffer[i]);
+        if (running > 2147483647LL || running < -2147483648LL)
+            _THROW_ERROR("CPU cumsum exceeded int32 range");
+        output_buffer[i] = static_cast<int32_t>(running);
+    }
+
+    copyToDevice(output_buffer);
 }
 
-[numthreads(BLOCK_SIZE, 1, 1)]
-void blockScan(
-    uint3 groupId : SV_GroupID,
-    uint3 localId : SV_GroupThreadID,
-    uniform Uniforms uniforms
-) {
-    uint tid = localId.x;
-    uint blockId = groupId.x;
-    uint gid = blockId * BLOCK_SIZE + tid;
+'''
+renderer = renderer[:start] + cpu_cumsum + renderer[end:]
 
-    s_data[tid] = (gid < uniforms.numElements) ? g_input[gid] : 0;
-    GroupMemoryBarrierWithGroupSync();
-    inclusiveWorkgroupScan(tid);
+# The CPU scan already leaves the inclusive prefix values in the host Buffer. Avoid an extra
+# one-element GPU readback and take num_indices directly from the last prefix value.
+old_num_indices = '''    if (commandBatchInProgress) bufferMemoryBarrier({
+        { buffers.index_buffer_offset.deviceBuffer, COMPUTE_SHADER_READ_WRITE },
+    }, TRANSFER_READ);
+    int num_indices = readElement<int32_t>(buffers.index_buffer_offset.deviceBuffer, num_elements-1);
+    buffers.num_indices = (size_t)num_indices;
+'''
+new_num_indices = '''    if (buffers.index_buffer_offset.empty()) {
+        buffers.num_indices = 0;
+    } else {
+        int32_t num_indices = buffers.index_buffer_offset.back();
+        if (num_indices < 0)
+            _THROW_ERROR("CPU cumsum produced a negative tile-index count");
+        buffers.num_indices = static_cast<size_t>(num_indices);
+    }
+'''
+if old_num_indices not in renderer:
+    raise SystemExit("cumsum num_indices readback patch anchor not found")
+renderer = renderer.replace(old_num_indices, new_num_indices, 1)
 
-    if (gid < uniforms.numElements)
-        g_output[gid] = s_data[tid];
-    if (tid == BLOCK_SIZE - 1)
-        g_blockSums[blockId] = s_data[tid];
-}
-
-[numthreads(BLOCK_SIZE, 1, 1)]
-void scanBlockSums(
-    uint3 groupId : SV_GroupID,
-    uint3 localId : SV_GroupThreadID,
-    uniform Uniforms uniforms
-) {
-    uint tid = localId.x;
-    uint blockId = groupId.x;
-    uint gid = blockId * BLOCK_SIZE + tid;
-
-    s_data[tid] = (gid < uniforms.numElements) ? g_blockSums[gid] : 0;
-    GroupMemoryBarrierWithGroupSync();
-    inclusiveWorkgroupScan(tid);
-
-    if (gid < uniforms.numElements)
-        g_blockSums[gid] = s_data[tid];
-}
-
-[numthreads(BLOCK_SIZE, 1, 1)]
-void addBlockOffsets(
-    uint3 groupId : SV_GroupID,
-    uint3 localId : SV_GroupThreadID,
-    uniform Uniforms uniforms
-) {
-    uint tid = localId.x;
-    uint blockId = groupId.x;
-    uint gid = blockId * BLOCK_SIZE + tid;
-    if (gid < uniforms.numElements && blockId > 0)
-        g_output[gid] += g_blockSums[blockId - 1];
-}
-
-[numthreads(BLOCK_SIZE, 1, 1)]
-void singlePassPrefixSum(
-    uint3 localId : SV_GroupThreadID,
-    uint3 globalId : SV_DispatchThreadID,
-    uniform Uniforms uniforms
-) {
-    uint tid = localId.x;
-    uint gid = globalId.x;
-
-    s_data[tid] = (gid < uniforms.numElements) ? g_input[gid] : 0;
-    GroupMemoryBarrierWithGroupSync();
-    inclusiveWorkgroupScan(tid);
-
-    if (gid < uniforms.numElements)
-        g_output[gid] = s_data[tid];
-}
-''')
-
-print("Patched VkSplat cumsum for Android with subgroup-independent 256-thread scan")
+renderer_path.write_text(renderer)
+print("Patched VkSplat cumsum for Android with CPU prefix scan; no cumsum Vulkan pipeline is created")
