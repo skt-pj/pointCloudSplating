@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -29,6 +30,7 @@ public final class DiagnosticLog {
     private static final String LOG_FILE_NAME = "diagnostic-history.log";
     private static final String PREFS_NAME = "diagnostic-log";
     private static final String PREF_LAST_EXIT_TIMESTAMP = "last_exit_timestamp";
+    private static final String PREF_LAST_NATIVE_TRACE_TIMESTAMP = "last_native_trace_timestamp";
     private static final ArrayDeque<String> LINES = new ArrayDeque<>();
     private static final SimpleDateFormat TIME = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
     private static final SimpleDateFormat DATE_TIME =
@@ -193,12 +195,7 @@ public final class DiagnosticLog {
                     message.append(" description=").append(description.replace('\n', ' '));
                 }
                 if (exit.getReason() == ApplicationExitInfo.REASON_CRASH_NATIVE) {
-                    boolean traceAvailable = false;
-                    try (java.io.InputStream trace = exit.getTraceInputStream()) {
-                        traceAvailable = trace != null;
-                    } catch (IOException | RuntimeException ignored) {
-                    }
-                    message.append(" nativeTraceAvailable=").append(traceAvailable);
+                    message.append(" nativeTraceCapture=enabled");
                 }
                 addLocked("W", "ProcessExit", message.toString(), null);
                 newestRecorded = Math.max(newestRecorded, exit.getTimestamp());
@@ -206,8 +203,53 @@ public final class DiagnosticLog {
             if (newestRecorded > lastRecorded) {
                 prefs.edit().putLong(PREF_LAST_EXIT_TIMESTAMP, newestRecorded).apply();
             }
+
+            recordHistoricalNativeTracesLocked(prefs, exits);
         } catch (RuntimeException e) {
             Log.w("DiagnosticLog", "Failed to read historical process exits", e);
+        }
+    }
+
+    private static void recordHistoricalNativeTracesLocked(
+            SharedPreferences prefs, List<ApplicationExitInfo> exits) {
+        if (Build.VERSION.SDK_INT < 31) return;
+        long lastTraceRecorded = prefs.getLong(PREF_LAST_NATIVE_TRACE_TIMESTAMP, 0L);
+        long newestTraceRecorded = lastTraceRecorded;
+        List<ApplicationExitInfo> nativeCrashes = new ArrayList<>();
+        for (ApplicationExitInfo exit : exits) {
+            if (exit.getReason() == ApplicationExitInfo.REASON_CRASH_NATIVE
+                    && exit.getTimestamp() > lastTraceRecorded) {
+                nativeCrashes.add(exit);
+            }
+        }
+        Collections.reverse(nativeCrashes);
+        for (ApplicationExitInfo exit : nativeCrashes) {
+            try (InputStream trace = exit.getTraceInputStream()) {
+                if (trace == null) {
+                    addLocked("W", "NativeTombstone",
+                            "trace unavailable time="
+                                    + DATE_TIME.format(new Date(exit.getTimestamp()))
+                                    + " pid=" + exit.getPid(), null);
+                } else {
+                    String parsed = NativeTombstoneParser.parse(trace);
+                    addLocked("E", "NativeTombstone",
+                            "time=" + DATE_TIME.format(new Date(exit.getTimestamp()))
+                                    + " process=" + exit.getProcessName()
+                                    + "\n" + parsed,
+                            null);
+                }
+            } catch (IOException | RuntimeException error) {
+                addLocked("W", "NativeTombstone",
+                        "trace parse failed time="
+                                + DATE_TIME.format(new Date(exit.getTimestamp()))
+                                + " pid=" + exit.getPid()
+                                + " error=" + error,
+                        null);
+            }
+            newestTraceRecorded = Math.max(newestTraceRecorded, exit.getTimestamp());
+        }
+        if (newestTraceRecorded > lastTraceRecorded) {
+            prefs.edit().putLong(PREF_LAST_NATIVE_TRACE_TIMESTAMP, newestTraceRecorded).apply();
         }
     }
 
