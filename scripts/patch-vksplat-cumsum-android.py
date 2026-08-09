@@ -161,9 +161,11 @@ if old_three_level not in renderer:
     raise SystemExit("three-level cumsum patch anchor not found")
 renderer = renderer.replace(old_three_level, new_three_level, 1)
 
-# Run a deterministic GPU-only cumsum self-test as soon as renderer pipelines exist. This exercises
-# the single-pass, two-level, and three-level paths before any dataset allocations or training work.
-# A driver/pipeline failure is therefore separated from model-data failures in diagnostics.
+# Run a deterministic GPU-only cumsum conformance test as soon as renderer pipelines exist. The
+# cumsum implementation starts a PerfTimer before its own DEVICE_GUARD, so the caller must already
+# own a command batch. Use VkSplat's DeviceGuard RAII exactly like production renderer call sites;
+# this keeps vkCmdWriteTimestamp inside a recording command buffer and preserves the upstream
+# HostGuard/DeviceGuard transitions when buffers resize during the scan.
 self_test_anchor = '''    createComputePipeline(pipeline_sum, spirv_paths.at("sum"));
     createComputePipeline(pipeline_where, spirv_paths.at("where"));
 
@@ -195,8 +197,12 @@ self_test_replacement = r'''    createComputePipeline(pipeline_sum, spirv_paths.
                 running += value;
                 expected[i] = static_cast<int32_t>(running);
             }
+            PCS_CUMSUM_LOGI("GPU cumsum self-test dispatch n=%zu", n);
             copyToDevice(pcsTestInput);
-            executeCumsum(pcsTestBuffers, pcsTestInput, pcsTestOutput);
+            {
+                DEVICE_GUARD;
+                executeCumsum(pcsTestBuffers, pcsTestInput, pcsTestOutput);
+            }
             copyFromDevice(pcsTestOutput);
             if (pcsTestOutput.size() != n) {
                 PCS_CUMSUM_LOGE("GPU cumsum self-test size mismatch n=%zu got=%zu", n, pcsTestOutput.size());
