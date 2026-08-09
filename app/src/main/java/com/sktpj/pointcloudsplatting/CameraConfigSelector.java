@@ -1,6 +1,5 @@
 package com.sktpj.pointcloudsplatting;
 
-import android.util.Log;
 import android.util.Size;
 
 import com.google.ar.core.CameraConfig;
@@ -12,9 +11,10 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 
-/** Selects a 30 fps SharedCamera config that leaves stream bandwidth for texture JPEG capture. */
+/** Selects a 30 fps SharedCamera config for continuous ARCore CPU-image keyframe capture. */
 public final class CameraConfigSelector {
     private static final String TAG = "CameraConfigSelector";
+    private static final long MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L;
 
     private CameraConfigSelector() {}
 
@@ -32,34 +32,28 @@ public final class CameraConfigSelector {
             return current;
         }
 
-        // Keep the same physical camera ARCore selected by default. Switching camera IDs here can
-        // silently move to a different rear lens and invalidate the intended photogrammetry setup.
         List<CameraConfig> sameCamera = new ArrayList<>();
         for (CameraConfig config : configs) {
-            if (currentCameraId.equals(config.getCameraId())) {
-                sameCamera.add(config);
-            }
+            if (currentCameraId.equals(config.getCameraId())) sameCamera.add(config);
         }
         List<CameraConfig> candidates = sameCamera.isEmpty() ? configs : sameCamera;
 
-        // ARCore always needs a tracking CPU stream and a GPU stream. A high CPU image config can
-        // introduce another ARCore surface. We intentionally choose the smallest CPU image size so
-        // the Pixel 10a still has stream bandwidth for the occasional ~12 MP JPEG surface. Among
-        // equally small CPU configs, keep the largest GPU preview resolution.
-        long minCpuPixels = candidates.stream()
-                .mapToLong(CameraConfigSelector::cpuPixelCount)
-                .min()
-                .orElse(cpuPixelCount(current));
-
+        // The scanner no longer inserts high-resolution Camera2 still captures. Prefer the largest
+        // ARCore CPU image that remains in a phone-friendly continuous 30 fps budget, because this
+        // exact YUV frame is what DatasetCaptureManager ranks and saves without interrupting preview.
         CameraConfig best = candidates.stream()
-                .filter(config -> cpuPixelCount(config) == minCpuPixels)
-                .max(Comparator.comparingLong(CameraConfigSelector::gpuPixelCount))
-                .orElse(current);
+                .filter(config -> cpuPixelCount(config) <= MAX_CONTINUOUS_CPU_PIXELS)
+                .max(Comparator
+                        .comparingLong(CameraConfigSelector::cpuPixelCount)
+                        .thenComparingLong(CameraConfigSelector::gpuPixelCount))
+                .orElseGet(() -> candidates.stream()
+                        .min(Comparator.comparingLong(CameraConfigSelector::cpuPixelCount))
+                        .orElse(current));
 
         Size cpu = best.getImageSize();
         Size gpu = best.getTextureSize();
         DiagnosticLog.i(TAG,
-                "Selected stream-safe SharedCamera config CPU="
+                "Selected continuous-capture SharedCamera config CPU="
                         + cpu.getWidth() + "x" + cpu.getHeight()
                         + " GPU=" + gpu.getWidth() + "x" + gpu.getHeight()
                         + " cameraId=" + best.getCameraId()
