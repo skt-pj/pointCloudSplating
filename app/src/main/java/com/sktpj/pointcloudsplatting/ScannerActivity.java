@@ -83,10 +83,10 @@ public final class ScannerActivity extends Activity
     private static final int MENU_TOGGLE_POINTS = 4;
     private static final String HIGH_RES_CAPTURE_TAG = "dataset_texture_still";
 
-    private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L; // 1/500 s
-    private static final long INDOOR_MAX_STILL_EXPOSURE_NS = 8_000_000L; // 1/125 s
+    private static final long TARGET_STILL_EXPOSURE_NS = 2_000_000L;
+    private static final long INDOOR_MAX_STILL_EXPOSURE_NS = 8_000_000L;
     private static final int INDOOR_MAX_ISO = 6400;
-    private static final long OUTDOOR_MAX_STILL_EXPOSURE_NS = 4_000_000L; // 1/250 s
+    private static final long OUTDOOR_MAX_STILL_EXPOSURE_NS = 4_000_000L;
     private static final int OUTDOOR_MAX_ISO = 3200;
 
     private enum CaptureEnvironment {
@@ -141,6 +141,7 @@ public final class ScannerActivity extends Activity
     private volatile int viewportHeight;
     private long depthTimestamp = -1L;
     private volatile String lastStatus = "";
+    private volatile String lastModelError = "";
     private volatile String lastUiSignature = "";
     private String cameraConfigSummary = "camera=?";
     private volatile boolean captureFinalized;
@@ -281,9 +282,10 @@ public final class ScannerActivity extends Activity
         uiHandler = new Handler(Looper.getMainLooper());
 
         surfaceView = new GLSurfaceView(this);
-        // Do not retain the camera GL context while another Activity is doing Vulkan 3DGS.
-        // Releasing it on pause returns camera/point-cloud GPU allocations before training.
-        surfaceView.setPreserveEGLContextOnPause(false);
+        // ARCore's SharedCamera sample preserves the EGL context across ordinary Activity pauses.
+        // Keep the camera texture stable while a scan is resumable. onPause disables preservation
+        // only after capture has been finalized and the Vulkan 3DGS processing Activity is starting.
+        surfaceView.setPreserveEGLContextOnPause(true);
         surfaceView.setEGLContextClientVersion(2);
         surfaceView.setEGLConfigChooser(8, 8, 8, 0, 16, 0);
         surfaceView.setRenderer(this);
@@ -432,9 +434,6 @@ public final class ScannerActivity extends Activity
         actionParams.bottomMargin = dp(16);
         root.addView(actionBar, actionParams);
 
-        // targetSdk 35+ is edge-to-edge on Android 15+. Keep camera content edge-to-edge,
-        // but move every interactive overlay into the safe drawing region. An extra 20dp
-        // breathing room keeps controls visibly away from the status bar/camera cutout.
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             int top = insets.getSystemWindowInsetTop();
             int bottom = insets.getSystemWindowInsetBottom();
@@ -665,6 +664,7 @@ public final class ScannerActivity extends Activity
         }
 
         processingModel = true;
+        lastModelError = "";
         gaussianButton.setEnabled(false);
         saveButton.setEnabled(false);
         modeButton.setEnabled(false);
@@ -679,20 +679,26 @@ public final class ScannerActivity extends Activity
                 processingModel = false;
                 gaussianButton.setEnabled(true);
                 if (result.success) {
+                    lastModelError = "";
                     showOperation("高品質3Dモデルを作成しました",
                             "完成した3Dモデルを表示します。", 100);
                     openViewer(datasetDirectory);
                 } else if (result.hqReady) {
+                    lastModelError = "";
                     showOperation("3Dプレビューを準備しました",
                             "撮影した高画質写真を反映したプレビューを表示します。", 100);
                     openViewer(datasetDirectory);
                 } else if (result.priorReady) {
+                    lastModelError = result.message;
                     showState("3Dプレビューを仕上げられませんでした",
-                            "撮影データは保存されています。「3Dプレビューを作成」をもう一度押してください。");
+                            result.message);
                     showFeedback("撮影データは失われていません。もう一度準備できます");
                 } else {
-                    showState("3Dプレビューを準備できませんでした",
-                            "ライブラリを確認して、もう一度お試しください。直らない場合は診断情報をコピーしてください。");
+                    lastModelError = result.message;
+                    showState("3Dモデルを作成できませんでした",
+                            result.message == null || result.message.isEmpty()
+                                    ? "診断情報をコピーして確認してください。"
+                                    : result.message);
                     DiagnosticLog.w(TAG, "3D preview preparation failed userMessage=" + result.message);
                 }
             });
@@ -753,6 +759,7 @@ public final class ScannerActivity extends Activity
                 .append("savedDatasetFrames=").append(photos).append('\n')
                 .append("captureFinalized=").append(captureFinalized).append('\n')
                 .append("processingModel=").append(processingModel).append('\n')
+                .append("lastModelError=").append(lastModelError).append('\n')
                 .append("photoDecision=").append(decision).append('\n')
                 .append("dataset=").append(dataset).append('\n')
                 .append("status=").append(lastStatus).append("\n\n")
@@ -795,10 +802,6 @@ public final class ScannerActivity extends Activity
         DiagnosticLog.i(TAG, "onResume");
         activityResumed = true;
 
-        // A finalized scan never needs the capture stack again. In particular, after the
-        // processing Activity finishes, do not recreate Camera2/ARCore/GL just to show the
-        // result/error UI. This keeps those resources free for the trainer and avoids a stale
-        // ARCore camera texture after the intentionally destroyed EGL context.
         if (captureFinalized) {
             DiagnosticLog.i(TAG, "Capture finalized; keeping camera/AR/GL suspended on resume");
             return;
@@ -810,12 +813,12 @@ public final class ScannerActivity extends Activity
         }
         if (session == null && !createSharedArSession()) return;
 
-        // setPreserveEGLContextOnPause(false) means the old texture name is invalid after pause.
-        // Force the camera-open path to wait for onSurfaceCreated(), which creates and binds the
-        // replacement external OES texture before openCameraForSharing() calls setCameraTextureName().
-        surfaceCreated = false;
+        // Ordinary scan pauses preserve the EGL context, so a resumed SharedCamera keeps the exact
+        // same external OES texture. This follows the ARCore SharedCamera sample lifecycle.
+        surfaceView.setPreserveEGLContextOnPause(true);
         surfaceView.onResume();
         surfaceViewResumed = true;
+        if (surfaceCreated) openCameraForSharing();
         registerDisplayListener();
         displayGeometryChanged = true;
         showState("準備中", "カメラを準備しています…");
@@ -857,9 +860,6 @@ public final class ScannerActivity extends Activity
             cameraCharacteristics = cameraManager.getCameraCharacteristics(cameraId);
             manualSensorSupported = supportsManualSensor(cameraCharacteristics);
 
-            // Continuous capture consumes ARCore's CPU YUV stream directly. Keep JPEG capability
-            // metadata for diagnostics/legacy dataset compatibility, but do not allocate an
-            // ImageReader or attach a JPEG Surface to the SharedCamera session.
             jpegSize = DatasetCaptureManager.chooseJpegSize(cameraCharacteristics);
             if (datasetCaptureManager != null) {
                 datasetCaptureManager.configureCamera(cameraId, jpegSize, cameraCharacteristics);
@@ -887,7 +887,7 @@ public final class ScannerActivity extends Activity
             showState("AR機能の更新が必要です", "Google Play 開発者サービス（AR）を更新してください。");
         } catch (UnavailableSdkTooOldException e) {
             DiagnosticLog.e(TAG, "ARCore SDK too old", e);
-            showState("アプリの更新が必要です", "最新のpointCloudSplatingをインストールしてください。");
+            showState("AR機能の更新が必要です", "最新のpointCloudSplatingをインストールしてください。");
         } catch (UnavailableDeviceNotCompatibleException e) {
             DiagnosticLog.e(TAG, "Device is not ARCore compatible", e);
             showState("この端末では利用できません", "この端末は必要なAR機能に対応していません。");
@@ -966,6 +966,10 @@ public final class ScannerActivity extends Activity
             DiagnosticLog.e(TAG, "Camera unavailable while resuming ARCore", e);
             showState("カメラを利用できません",
                     "ほかのアプリがカメラを使用していないか確認して、もう一度お試しください。");
+        } catch (RuntimeException e) {
+            DiagnosticLog.e(TAG, "ARCore failed while resuming SharedCamera", e);
+            showState("カメラを再開できませんでした",
+                    "診断情報をコピーして確認してください。");
         }
     }
 
@@ -1093,9 +1097,12 @@ public final class ScannerActivity extends Activity
         DiagnosticLog.i(TAG, "onPause");
         activityResumed = false;
         unregisterDisplayListener();
-        // The EGL context is not preserved. Clear this before pausing so onResume cannot open
-        // SharedCamera against the texture id from the destroyed context.
-        surfaceCreated = false;
+
+        // Preserve the exact external OES texture for an ordinary scan pause/resume. Once capture
+        // is finalized, release the EGL context so the foreground Vulkan trainer gets the GPU memory.
+        boolean releaseGlForModel = captureFinalized || processingModel || ModelProcessingCoordinator.isActive();
+        surfaceView.setPreserveEGLContextOnPause(!releaseGlForModel);
+        if (releaseGlForModel) surfaceCreated = false;
         if (surfaceViewResumed) {
             surfaceView.onPause();
             surfaceViewResumed = false;
@@ -1230,12 +1237,10 @@ public final class ScannerActivity extends Activity
                 String decision = datasetCaptureManager == null ? "dataset unavailable" : datasetCaptureManager.getLastDecision();
                 updateCaptureUi(photos, decision);
             } catch (Throwable t) {
-                // Latch the first fatal frame failure instead of calling Session.update() again
-                // every render frame. onPause still sees arcoreActive=true and pauses the session.
                 frameFailureLatched = true;
                 DiagnosticLog.e(TAG, "OpenGL/ARCore frame failed; frame loop latched", t);
                 showState("撮影を続けられませんでした",
-                        "アプリを開き直してください。直らない場合は診断情報をコピーしてください。");
+                        "診断情報をコピーして確認してください。");
             }
         }
     }
@@ -1264,6 +1269,7 @@ public final class ScannerActivity extends Activity
         if (lower.contains("too dark") || lower.contains("exposure quality")) return "少し明るい場所へ移動するか、照明をつけてください。";
         if (lower.contains("lower blur")) return "端末をもう少しゆっくり動かしてください。";
         if (lower.contains("focus") || lower.contains("lens")) return "ピントを合わせています。端末を少し止めてください。";
+        if (lower.contains("selecting best frame")) return "候補画像から鮮明な1枚を選んでいます。";
         if (lower.contains("capture in flight")
                 || lower.contains("requesting texture photo")
                 || lower.contains("waiting briefly for raw depth prior")) {
@@ -1273,7 +1279,7 @@ public final class ScannerActivity extends Activity
         if (lower.contains("next viewpoint") || lower.contains("new viewpoint")) return photos == 0
                 ? "対象にカメラを向け、ゆっくり動かしてください。"
                 : "少し角度を変えて、対象の周りをゆっくり撮影してください。";
-        if (lower.contains("saved frame")) return "写真を保存できました。別の角度からも続けてください。";
+        if (lower.contains("saved selected frame") || lower.contains("saved frame")) return "選別した写真を保存しました。別の角度からも続けてください。";
         if (lower.contains("camera resumed") || lower.contains("capture resumed")) return "対象の周りをゆっくり動かして撮影を続けてください。";
         if (lower.contains("camera not ready") || lower.contains("metadata")) return "カメラを準備しています。端末を少し止めてください。";
         return photos == 0 ? "対象の周りをゆっくり動かしてください。" : "別の角度からもゆっくり撮影してください。";
