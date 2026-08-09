@@ -57,7 +57,9 @@ runpy.run_path("scripts/patch-vksplat-command-batch-android.py", run_name="__mai
 runpy.run_path("scripts/patch-vksplat-checkpoint-android.py", run_name="__main__")
 
 # Existing PCS models from builds before resumable checkpoints still contain the converged Gaussian
-# parameters in splat.ply. Import those exact parameters once, initialize only the unavailable Adam
-# moments, then publish a v2 checkpoint so every later run is an exact optimizer-state continuation.
+# parameters in splat.ply. Import those parameters once, initialize only the unavailable Adam
+# moments, and apply the same finite-value validity contract used by the viewer before publishing
+# a v2 checkpoint for every later exact continuation.
 runpy.run_path("scripts/patch-vksplat-legacy-resume-android.py", run_name="__main__")
+runpy.run_path("scripts/patch-vksplat-legacy-ply-validity-android.py", run_name="__main__")
 runpy.run_path("scripts/patch-vksplat-legacy-resume-hint-android.py", run_name="__main__")
