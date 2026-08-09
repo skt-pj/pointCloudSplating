@@ -15,7 +15,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-/** Finalizes RGB/Pose observations, optional Raw Depth priors and JPEG-specific camera calibration. */
+/** Finalizes RGB/Pose observations and optional Raw Depth priors. */
 public final class DatasetFinalizer {
     private DatasetFinalizer() {}
 
@@ -40,20 +40,18 @@ public final class DatasetFinalizer {
             transforms.put("camera_model","OPENCV");
             transforms.put("k1",0.0);transforms.put("k2",0.0);transforms.put("p1",0.0);transforms.put("p2",0.0);
             transforms.put("coordinate_system","ARCore root-anchor local; OpenGL camera convention (+X right,+Y up,-Z forward)");
-            transforms.put("source","pointCloudSplating ARCore SharedCamera");
-            transforms.put("jpeg_intrinsics_policy",calibration!=null
-                    ? "Camera2 LENS_INTRINSIC_CALIBRATION mapped through per-frame SCALER_CROP_REGION to JPEG pixels; ARCore image intrinsics fallback"
-                    : "ARCore image intrinsics scaled to JPEG pixels fallback");
+            transforms.put("source","pointCloudSplating ARCore SharedCamera continuous CPU frames");
+            transforms.put("intrinsics_policy","Continuous ARCore CPU frames use the exact ARCore image intrinsics for that stream; legacy Camera2 stills retain Camera2 calibration mapping when present");
 
             JSONArray frames=new JSONArray();int depthFrames=0;int camera2CalibratedFrames=0;
             for(JSONObject source:sourceFrames){JSONObject frame=toNerfstudioFrame(source,calibration);frames.put(frame);if(frame.has("depth_point_cloud_path"))depthFrames++;if("camera2_lens_intrinsic_calibration".equals(frame.optString("intrinsics_source","")))camera2CalibratedFrames++;}
             transforms.put("frames",frames);transforms.put("rgb_frame_count",sourceFrames.size());transforms.put("raw_depth_prior_frame_count",depthFrames);transforms.put("camera2_calibrated_rgb_frame_count",camera2CalibratedFrames);
             writeJson(new File(workingDirectory,"transforms.json"),transforms);
 
-            JSONObject manifest=new JSONObject();manifest.put("format_version",3);manifest.put("state","saved");manifest.put("frame_count",sourceFrames.size());manifest.put("rgb_frame_count",sourceFrames.size());manifest.put("raw_depth_prior_frame_count",depthFrames);manifest.put("camera2_calibrated_rgb_frame_count",camera2CalibratedFrames);manifest.put("transforms","transforms.json");manifest.put("image_pattern","frame_*.jpg");manifest.put("per_frame_metadata_pattern","frame_*.json");manifest.put("raw_depth_point_cloud_pattern","frame_*.ply (optional per RGB frame)");manifest.put("capture_strategy","quality-gated RGB/Pose observations selected by viewpoint change, focus, exposure and motion");manifest.put("observation_priority","High-resolution RGB + synchronized camera pose are primary 3DGS observations; Raw Depth PLY is an optional geometry prior and does not gate a valid RGB frame.");manifest.put("intrinsics_priority","Camera2 physical-camera calibration and crop mapping for JPEG when available; ARCore image-intrinsics scaling only as fallback.");
+            JSONObject manifest=new JSONObject();manifest.put("format_version",4);manifest.put("state","saved");manifest.put("frame_count",sourceFrames.size());manifest.put("rgb_frame_count",sourceFrames.size());manifest.put("raw_depth_prior_frame_count",depthFrames);manifest.put("camera2_calibrated_rgb_frame_count",camera2CalibratedFrames);manifest.put("transforms","transforms.json");manifest.put("image_pattern","frame_*.jpg");manifest.put("per_frame_metadata_pattern","frame_*.json");manifest.put("raw_depth_point_cloud_pattern","frame_*.ply (optional per RGB frame)");manifest.put("capture_strategy","continuous ARCore CPU-frame sampling; automatically keep the sharpest frame from each moving viewpoint window");manifest.put("observation_priority","Automatically selected RGB + synchronized camera pose are primary 3DGS observations; Raw Depth PLY is an optional geometry prior and does not gate a valid RGB frame.");manifest.put("intrinsics_priority","Exact ARCore image intrinsics for continuous CPU frames; Camera2 physical-camera calibration only for legacy Camera2 still captures.");
             writeJson(new File(workingDirectory,"dataset_manifest.json"),manifest);
             try(FileOutputStream out=new FileOutputStream(new File(workingDirectory,".saved"))){out.write("saved\n".getBytes(StandardCharsets.UTF_8));}
-            DiagnosticLog.i("DatasetFinalizer","Finalized RGB="+sourceFrames.size()+" depthPrior="+depthFrames+" camera2Intrinsics="+camera2CalibratedFrames);
+            DiagnosticLog.i("DatasetFinalizer","Finalized continuous RGB="+sourceFrames.size()+" depthPrior="+depthFrames+" legacyCamera2Intrinsics="+camera2CalibratedFrames);
             File finalDirectory=renameAsSavedDataset(workingDirectory);return Result.ok(finalDirectory,sourceFrames.size());
         } catch(IOException|JSONException|RuntimeException e){DiagnosticLog.e("DatasetFinalizer","Failed to finalize dataset",e);return Result.fail(workingDirectory,"finalize failed: "+e.getClass().getSimpleName());}
     }
@@ -71,7 +69,7 @@ public final class DatasetFinalizer {
             int left=active.getInt("left"),top=active.getInt("top"),right=active.getInt("right"),bottom=active.getInt("bottom");
             if(!finitePositive(fx)||!finitePositive(fy)||right<=left||bottom<=top)return null;
             return new Camera2Calibration(fx,fy,cx,cy,skew,left,top,right,bottom);
-        }catch(Exception e){DiagnosticLog.w("DatasetFinalizer","Camera2 JPEG calibration unavailable: "+e.getMessage());return null;}
+        }catch(Exception e){DiagnosticLog.w("DatasetFinalizer","Camera2 calibration unavailable: "+e.getMessage());return null;}
     }
 
     private static JSONObject toNerfstudioFrame(JSONObject source,Camera2Calibration calibration)throws JSONException{
@@ -80,7 +78,7 @@ public final class DatasetFinalizer {
         Camera2MappedIntrinsics mapped=mapCamera2ToJpeg(source,calibration,jpegWidth,jpegHeight);
         if(mapped!=null){fx=mapped.fx;fy=mapped.fy;cx=mapped.cx;cy=mapped.cy;skew=mapped.skew;intrinsicsSource="camera2_lens_intrinsic_calibration";}
         else{
-            JSONObject intrinsics=source.getJSONObject("arcore_image_intrinsics");JSONArray focal=intrinsics.getJSONArray("focal_length_px");JSONArray principal=intrinsics.getJSONArray("principal_point_px");JSONArray dimensions=intrinsics.getJSONArray("image_dimensions");double sourceWidth=dimensions.getDouble(0),sourceHeight=dimensions.getDouble(1);double scaleX=jpegWidth/sourceWidth,scaleY=jpegHeight/sourceHeight;fx=focal.getDouble(0)*scaleX;fy=focal.getDouble(1)*scaleY;cx=principal.getDouble(0)*scaleX;cy=principal.getDouble(1)*scaleY;intrinsicsSource="arcore_image_intrinsics_scaled_fallback";
+            JSONObject intrinsics=source.getJSONObject("arcore_image_intrinsics");JSONArray focal=intrinsics.getJSONArray("focal_length_px");JSONArray principal=intrinsics.getJSONArray("principal_point_px");JSONArray dimensions=intrinsics.getJSONArray("image_dimensions");double sourceWidth=dimensions.getDouble(0),sourceHeight=dimensions.getDouble(1);double scaleX=jpegWidth/sourceWidth,scaleY=jpegHeight/sourceHeight;fx=focal.getDouble(0)*scaleX;fy=focal.getDouble(1)*scaleY;cx=principal.getDouble(0)*scaleX;cy=principal.getDouble(1)*scaleY;intrinsicsSource="arcore_image_intrinsics";
         }
 
         JSONObject out=new JSONObject();out.put("file_path",source.getString("image"));
@@ -91,11 +89,14 @@ public final class DatasetFinalizer {
     private static Camera2MappedIntrinsics mapCamera2ToJpeg(JSONObject source,Camera2Calibration c,int w,int h){
         if(c==null)return null;
         try{
+            // Continuous ARCore CPU images are already paired with exact ARCore image intrinsics.
+            // Never reinterpret those pixels through the Camera2 active array/crop model.
+            JSONObject capture=source.optJSONObject("camera2_capture");
+            if(capture==null)return null;
             int left=c.activeLeft,top=c.activeTop,right=c.activeRight,bottom=c.activeBottom;
-            JSONObject capture=source.optJSONObject("camera2_capture");JSONObject crop=capture==null?null:capture.optJSONObject("crop_region");
+            JSONObject crop=capture.optJSONObject("crop_region");
             if(crop!=null){left=crop.getInt("left");top=crop.getInt("top");right=crop.getInt("right");bottom=crop.getInt("bottom");}
             double cropW=right-left,cropH=bottom-top;if(cropW<=0||cropH<=0)return null;
-            // Camera2 intrinsic calibration and crop are both defined in the pre-correction active-array coordinate system.
             double sx=w/cropW,sy=h/cropH;double fx=c.fx*sx,fy=c.fy*sy,cx=(c.cx-left)*sx,cy=(c.cy-top)*sy,skew=c.skew*sx;
             if(!finitePositive(fx)||!finitePositive(fy)||!Double.isFinite(cx)||!Double.isFinite(cy))return null;
             if(cx<-w*.25||cx>w*1.25||cy<-h*.25||cy>h*1.25)return null;
