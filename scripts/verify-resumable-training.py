@@ -10,6 +10,7 @@ JOB = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.j
 LIBRARY = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java"
 TRAINER_CPP = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_trainer.cpp"
 TRAINER_H = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_trainer.h"
+MAGIC_V2 = "kPcsCheckpointMagic[8] = {'P','C','S','3','D','G','S','2'}"
 
 
 def require(text: str, needle: str, why: str) -> None:
@@ -49,7 +50,7 @@ def main() -> None:
         require(checkpoint, needle, why)
 
     for needle, why in [
-        ("PCS3DGS2", "v2 checkpoint magic missing"),
+        (MAGIC_V2, "v2 checkpoint magic missing"),
         ("kPcsCheckpointVersion = 2", "v2 checkpoint version missing"),
         ("importLegacyTrainingPly", "legacy PLY import API missing"),
         ("resume_optimizer_step", "legacy migration does not separate Adam age from total steps"),
@@ -87,16 +88,15 @@ def main() -> None:
     require(library, "showCustomTrainingInput", "arbitrary user-selected steps are missing")
 
     if TRAINER_CPP.is_file() and TRAINER_H.is_file():
-        trainer_cpp = TRAINER_CPP.read_text(encoding="utf-8")
-        trainer_h = TRAINER_H.read_text(encoding="utf-8")
+        prepared = TRAINER_CPP.read_text(encoding="utf-8") + TRAINER_H.read_text(encoding="utf-8")
         for needle, why in [
             ("importLegacyTrainingPly", "prepared trainer has no legacy importer"),
             ("legacy_resume_step.txt", "prepared trainer has no legacy hint bridge"),
-            ("PCS3DGS2", "prepared trainer is not using checkpoint v2"),
+            (MAGIC_V2, "prepared trainer is not using checkpoint v2"),
             ("resume_optimizer_step", "prepared trainer does not separate Adam age"),
             ("Saved PCS 3DGS checkpoint", "prepared trainer does not save continuation state"),
         ]:
-            require(trainer_cpp + trainer_h, needle, why)
+            require(prepared, needle, why)
 
     print("PCS exact checkpoint + legacy PLY 3DGS continuation checks passed")
 
