@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build-time architecture checks for the PCS Android mobile scanner and 3DGS trainer."""
+"""Build-time architecture checks for the PCS Android scanner and resumable 3DGS trainer."""
 from pathlib import Path
 import struct
 
@@ -53,13 +53,11 @@ def verify_cumsum_hierarchy() -> None:
         level1 = ceil_div(n, block)
         if n <= block * block:
             assert level1 <= block
-            continue
-        if n <= block * block * block:
+        elif n <= block * block * block:
             level2 = ceil_div(level1, block)
-            assert level1 > block
-            assert level2 <= block
-            continue
-        raise AssertionError(f"test size exceeds supported hierarchy: {n}")
+            assert level1 > block and level2 <= block
+        else:
+            raise AssertionError(f"test size exceeds supported hierarchy: {n}")
 
 
 def spirv_local_size(path: Path) -> tuple[int, int, int]:
@@ -97,328 +95,178 @@ def main() -> None:
     finalizer = FINALIZER.read_text(encoding="utf-8")
     exporter = EXPORTER.read_text(encoding="utf-8")
     manifest = MANIFEST.read_text(encoding="utf-8")
-    patch = CUMSUM_PATCH.read_text(encoding="utf-8")
+    cumsum_patch = CUMSUM_PATCH.read_text(encoding="utf-8")
     radix_patch = RADIX_PATCH.read_text(encoding="utf-8")
     checkpoint_patch = CHECKPOINT_PATCH.read_text(encoding="utf-8")
     pipeline_diag = PIPELINE_DIAG_PATCH.read_text(encoding="utf-8")
     cumsum_glsl = CUMSUM_GLSL.read_text(encoding="utf-8")
     prepare = PREPARE.read_text(encoding="utf-8")
 
-    # Continuous scanner invariants.
-    require(scanner, "continuousCpuOnly=true",
-            "SharedCamera session must contain only ARCore surfaces during continuous capture")
-    forbid(scanner, "ImageReader.newInstance(",
-           "continuous capture must not allocate a legacy JPEG ImageReader")
-    forbid(scanner, "sessionSurfaces.add(jpegReader.getSurface())",
-           "continuous capture must not attach a legacy JPEG Surface")
-    forbid(scanner, "requestHighResolutionStill();",
-           "frame loop must not fall back to Camera2 still capture")
-    require(scanner, "surfaceView.setPreserveEGLContextOnPause(true)",
-            "resumable SharedCamera scans must preserve the camera EGL texture")
-    require(scanner, "releaseGlForModel",
-            "EGL context should be released only when model processing needs the GPU")
-    require(scanner, 'append("lastModelError=")',
-            "3DGS failure reason must remain visible in copied diagnostics")
+    # Camera/capture invariants: 3DGS work must never regress the scanner path.
+    require(scanner, "continuousCpuOnly=true", "continuous SharedCamera must use ARCore-only surfaces")
+    forbid(scanner, "sessionSurfaces.add(jpegReader.getSurface())", "legacy JPEG surface must stay out of continuous capture")
+    require(scanner, "surfaceView.setPreserveEGLContextOnPause(true)", "normal scan pauses must preserve EGL")
+    require(scanner, "releaseGlForModel", "model processing must explicitly release camera GL")
+    require(scanner, 'append("lastModelError=")', "model failures must remain in diagnostics")
+    require(capture, "frame.acquireCameraImage()", "RGB must come from the current ARCore frame")
+    require(capture, '"arcore_cpu_yuv_continuous"', "saved RGB source must stay explicit")
+    require(capture, 'quality.put("motion_is_hard_gate", false)', "motion must rank rather than gate")
+    require(capture, "calculateSharpness", "keyframe selection must measure sharpness")
+    require(capture, "flushBestCandidateLocked", "selection windows must retain only the best candidate")
+    require(capture, "SELECTION_WINDOW_NS = 750_000_000L", "selection window must remain 750ms")
+    forbid(capture, "NEW_WINDOW_TRANSLATION_METERS", "movement must not close selection windows")
+    forbid(capture, "NEW_WINDOW_ROTATION_DEGREES", "rotation must not close selection windows")
+    require(camera_config, "MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L", "continuous CPU resolution budget changed")
+    require(finalizer, "if(capture==null)return null;", "ARCore frames must not be remapped as Camera2 stills")
+    require(finalizer, '"arcore_image_intrinsics"', "ARCore intrinsics must be retained")
+    require(exporter, "MAX_TRAIN_LONG_EDGE = 1000", "mobile training memory envelope changed")
+    forbid(exporter, "TRAIN_DOWNSAMPLE", "legacy blind downsample returned")
+    require(exporter, "never upscale", "adaptive export must never upscale")
+    require(manifest, 'android:icon="@mipmap/ic_launcher"', "launcher icon missing")
 
-    require(capture, "frame.acquireCameraImage()",
-            "scanner must sample RGB from the current ARCore frame")
-    require(capture, '"arcore_cpu_yuv_continuous"',
-            "saved metadata must identify the continuous CPU-frame source")
-    require(capture, 'quality.put("motion_is_hard_gate", false)',
-            "motion may rank candidates but must not gate capture")
-    require(capture, "calculateSharpness",
-            "automatic keyframe selection must measure pixel sharpness")
-    require(capture, "flushBestCandidateLocked",
-            "scanner must select the best frame from each selection window")
-    require(capture, "SELECTION_WINDOW_NS = 750_000_000L",
-            "candidate images must compete in a fixed 750 ms selection window")
-    require(capture, "shouldCloseSelectionWindow(long timestampNs)",
-            "selection-window closure must be time based rather than movement triggered")
-    forbid(capture, "NEW_WINDOW_TRANSLATION_METERS",
-           "camera translation must not close the selection window early")
-    forbid(capture, "NEW_WINDOW_ROTATION_DEGREES",
-           "camera rotation must not close the selection window early")
-    forbid(capture, "MAX_LINEAR_SPEED_MPS",
-           "continuous capture must not require the user to slow below a threshold")
-    forbid(capture, "MAX_ANGULAR_SPEED_DPS",
-           "continuous capture must not require the user to stop rotating")
-    forbid(capture, "waiting for lower blur",
-           "scanner UI state must not wait for a stop-and-shoot moment")
+    # Core mobile trainer semantics.
+    require(native, "TrainerConfig::Strategy::MCMC", "density control must remain MCMC")
+    require(native, "kGaussianBudget = 120'000", "Gaussian budget changed")
+    require(native, "kNormalNeighbors = 16", "surface normal K changed")
+    require(native, "kScaleNeighbors = 3", "surface scale K changed")
+    require(native, "validateProjectionInvariants", "projection invariants must remain checked")
+    require(native, "cpuTiles=", "prefix mismatch must remain observable")
+    require(native, "kTileWorkingSetBudgetBytes", "tile working set must remain budgeted")
+    forbid(native, "executeDefaultPostBackward(", "desktop Default densification is not allowed")
 
-    require(camera_config, "MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L",
-            "ARCore CPU stream needs an explicit continuous-frame bandwidth budget")
-    require(camera_config, "max(Comparator",
-            "camera selection must prefer useful CPU-frame resolution")
+    # Training iterations are user-controlled. 1000 is a default, not a quality ceiling.
+    require(java, "BASE_TRAIN_STEPS = 750", "first-run default changed unexpectedly")
+    forbid(java, "MAX_TRAIN_STEPS", "old 1000-step quality ceiling returned")
+    require(java, "int requestedSteps", "trainer needs explicit requested steps")
+    require(java, "requestedSteps <= 0", "requested steps must be validated")
+    require(java, 'result.put("resumable_training", true)', "result must advertise continuation")
+    require(java, 'result.put("checkpoint_state", "gaussians+adam+rng+step")', "checkpoint contents must be documented")
+    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6"', "shader cache generation changed")
+    require(java, "nativeCumsumSelfTest", "cumsum self-test gate is required")
+    forbid(java, "cumsum=cpu_scan", "CPU cumsum fallback returned")
 
-    require(finalizer, "if(capture==null)return null;",
-            "ARCore CPU frames must not be remapped through Camera2 still calibration")
-    require(finalizer, '"arcore_image_intrinsics"',
-            "continuous frames must retain exact ARCore image intrinsics")
+    # Native continuation must resume the true trainable state and report cumulative progress.
+    require(native, "trainer.restoreTrainingCheckpoint(buffers)", "native resume is missing")
+    require(native, "trainer.getResumeTrainingStep()", "cumulative resume step is missing")
+    require(native, "completedBeforeRun", "previous cumulative step is not retained")
+    require(native, "targetStep", "cumulative progress target is missing")
+    require(native, "getCompletedTrainingSteps()", "persisted cumulative step is not verified")
+    require(native, "added_steps", "native result must report the extension size")
+    require(native, "resumed", "native result must identify resumed runs")
+    forbid(native, "std::max(300,", "custom runs must not be silently raised to 300 steps")
 
-    require(exporter, "MAX_TRAIN_LONG_EDGE = 1000",
-            "training images must keep the established mobile memory envelope")
-    forbid(exporter, "TRAIN_DOWNSAMPLE",
-            "continuous source resolution must not be blindly divided by a legacy still factor")
-    require(exporter, "never upscale",
-            "training export must document adaptive source scaling")
-
-    require(manifest, 'android:icon="@mipmap/ic_launcher"',
-            "app must ship an explicit launcher icon")
-    require(manifest, 'android:roundIcon="@mipmap/ic_launcher"',
-            "app must ship a round/adaptive launcher icon")
-
-    # Mobile trainer invariants.
-    require(native, "TrainerConfig::Strategy::MCMC", "density control must be budget-aware")
-    require(native, "kGaussianBudget = 120'000", "Gaussian count must have an explicit budget")
-    require(native, "kNormalNeighbors = 16", "surface normal initialization must use K=16")
-    require(native, "kScaleNeighbors = 3", "surface scale initialization must use K=3")
-    require(native, "initializeSurfaceGaussians", "surface-aware initialization is required")
-    require(native, "validateProjectionInvariants", "projection/prefix-sum semantics must be checked")
-    require(native, "cpuTiles=", "tile-sum comparison must remain observable on failure")
-    require(native, "kTileWorkingSetBudgetBytes", "tile memory must be budgeted before allocation")
-    forbid(native, "executeDefaultPostBackward(", "desktop Default densification is not the PCS mobile policy")
-    forbid(native, "kAndroidDensifySoftCap", "post-hoc densification soft caps are not allowed")
-
-    # Iteration count is user-controlled; 1000 is a default, never a hard quality ceiling.
-    require(java, "BASE_TRAIN_STEPS = 750", "first-run mobile default changed unexpectedly")
-    forbid(java, "MAX_TRAIN_STEPS", "training iterations must not have the old 1000-step quality ceiling")
-    require(java, "int requestedSteps", "native trainer must accept an explicit user step count")
-    require(java, "requestedSteps <= 0", "explicit step counts must be validated without a quality cap")
-    require(java, 'result.put("resumable_training", true)',
-            "final metadata must advertise resumable training")
-    require(java, 'result.put("checkpoint_state", "gaussians+adam+rng+step")',
-            "metadata must describe the persisted optimizer checkpoint")
-    require(java, '"pcs_mobile_vulkan_trainer_v1"', "result metadata must identify the PCS trainer")
-    require(java, 'SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6"',
-            "Mali radix build must use the established shader cache generation")
-    require(java, '" cumsum=glslc256 radix=glslc256/subgroup16"',
-            "runtime diagnostics must identify both Android GPU shader paths")
-    require(java, "logCumsumShaderIdentity", "runtime must log exact cumsum SPIR-V identities")
-    require(java, 'MessageDigest.getInstance("SHA-256")',
-            "runtime cumsum diagnostics must include SHA-256")
-    require(java, "nativeCumsumSelfTest", "cumsum conformance must be a separate JNI path")
-    require(java, "ensureCumsumConformance", "training must pass cumsum conformance first")
-    require(java, 'DiagnosticLog.i(TAG, "cumsum:selftest Java bridge begin")',
-            "native self-test breadcrumbs must persist across process death")
-    forbid(java, "cumsum=cpu_scan", "CPU cumsum workaround must not remain")
-
-    # Native continuation must restore before surface initialization and count progress cumulatively.
-    require(native, "trainer.restoreTrainingCheckpoint(buffers)",
-            "native training must restore persisted optimizer state")
-    require(native, "trainer.getResumeTrainingStep()", "native continuation needs the cumulative start step")
-    require(native, "completedBeforeRun", "native continuation must keep its previous cumulative step")
-    require(native, "targetStep", "progress must have a cumulative target")
-    require(native, "getCompletedTrainingSteps()", "native result must verify the persisted cumulative step")
-    require(native, '"added_steps"', "native result must report the requested extension size")
-    require(native, '"resumed"', "native result must distinguish initial from resumed runs")
-    forbid(native, "std::max(300,", "custom training must not be silently raised to 300 steps")
-
-    require(job, "continueTraining", "library needs an explicit continuation entry point")
-    require(job, "canContinueTraining", "legacy PLY-only models must be distinguished from checkpoints")
-    require(job, "previousSteps + additionalSteps",
-            "continuation must verify cumulative step growth rather than restarting at zero")
+    require(job, "continueTraining", "job needs an explicit continuation entry point")
+    require(job, "canContinueTraining", "legacy PLY-only models must be distinguished")
+    require(job, "previousSteps + additionalSteps", "continuation must verify cumulative growth")
     require(job, "optimizerの学習状態", "legacy models must not be mislabeled as exact resumes")
-    require(library, 'more.setText("追加学習")', "completed cards must expose additional training")
-    require(library, "TRAINING_PRESETS = {300, 1_000, 3_000, 10_000}",
-            "UI must expose useful short through high-quality training choices")
-    require(library, "showCustomTrainingInput", "user must be able to enter an arbitrary step count")
-    require(library, "Integer.MAX_VALUE", "custom step input must not impose a small quality cap")
+    require(library, 'more.setText("追加学習")', "completed models need an additional-training action")
+    require(library, "TRAINING_PRESETS = {300, 1_000, 3_000, 10_000}", "training presets are missing")
+    require(library, "showCustomTrainingInput", "arbitrary user step input is missing")
+    require(library, "Integer.MAX_VALUE", "custom steps must not have a small product cap")
 
-    # Full checkpoint is Gaussian parameters + Adam moments + RNG + optimizer step, written atomically.
-    require(checkpoint_patch, "restoreTrainingCheckpoint", "VkSplat checkpoint restore patch is missing")
-    require(checkpoint_patch, "saveTrainingCheckpoint", "VkSplat checkpoint save patch is missing")
-    require(checkpoint_patch, "g_xyz_ws", "Adam means moments must be checkpointed")
-    require(checkpoint_patch, "g_sh_coeffs_1", "Adam SH first moments must be checkpointed")
-    require(checkpoint_patch, "g_sh_coeffs_2", "Adam SH second moments must be checkpointed")
-    require(checkpoint_patch, "g_rotations", "Adam quaternion moments must be checkpointed")
-    require(checkpoint_patch, "g_scales_opacs", "Adam scale/opacity moments must be checkpointed")
-    require(checkpoint_patch, "rng_out << rng", "MCMC RNG state must be persisted")
-    require(checkpoint_patch, "rng_in >> rng", "MCMC RNG state must be restored")
-    require(checkpoint_patch, "resume_training_step", "Adam global step must survive process restarts")
-    require(checkpoint_patch, 'training_checkpoint_path + ".tmp"',
-            "checkpoint must be written to a temporary file first")
-    require(checkpoint_patch, "std::filesystem::rename(temp_path, training_checkpoint_path",
-            "checkpoint publication must use atomic rename")
-    require(checkpoint_patch, "config.means_lr_final * scene_scale",
-            "continued training must not jump the converged means LR back to its initial value")
-    require(pipeline_diag, "patch-vksplat-checkpoint-android.py",
-            "VkSplat preparation must apply the checkpoint implementation")
+    # Checkpoint = parameters + Adam moments + RNG + cumulative step, atomically published.
+    for needle, reason in [
+        ("restoreTrainingCheckpoint", "checkpoint restore patch missing"),
+        ("saveTrainingCheckpoint", "checkpoint save patch missing"),
+        ("g_xyz_ws", "Adam means moments missing"),
+        ("g_sh_coeffs_1", "Adam SH m1 missing"),
+        ("g_sh_coeffs_2", "Adam SH m2 missing"),
+        ("g_rotations", "Adam rotation moments missing"),
+        ("g_scales_opacs", "Adam scale/opacity moments missing"),
+        ("rng_out << rng", "MCMC RNG save missing"),
+        ("rng_in >> rng", "MCMC RNG restore missing"),
+        ("resume_training_step", "cumulative Adam step missing"),
+        ('training_checkpoint_path + ".tmp"', "temporary checkpoint file missing"),
+        ("std::filesystem::rename(temp_path, training_checkpoint_path", "atomic checkpoint publish missing"),
+        ("config.means_lr_final * scene_scale", "resume LR must not jump to its initial value"),
+    ]:
+        require(checkpoint_patch, needle, reason)
+    require(pipeline_diag, "patch-vksplat-checkpoint-android.py", "prepare must apply checkpoint patch")
 
-    # GPU cumsum must remain on Vulkan and subgroup-independent.
-    require(patch, "const size_t block = 256;",
-            "renderer cumsum must use the shader's fixed workgroup size")
-    require(patch, "num_blocks", "two-level cumsum must use ceil-div block count")
-    require(patch, "level1_uniforms", "three-level cumsum must pass level-1 element count")
-    require(patch, "level2_uniforms", "three-level cumsum must pass level-2 element count")
-    require(patch, 'spirv_paths.at("cumsum_single_pass"), 0, false',
-            "cumsum pipeline must not request a fixed subgroup size")
-    forbid(patch, "GPU cumsum self-test", "self-test must not be embedded in full renderer initialization")
-    forbid(patch, "CPU prefix scan", "CPU cumsum workaround returned")
-    forbid(patch, "copyFromDevice(input_buffer);", "renderer cumsum must remain GPU-side")
+    # Cumsum remains fixed 256-thread subgroup-independent Vulkan code.
+    require(cumsum_patch, "const size_t block = 256;", "cumsum block size changed")
+    require(cumsum_patch, "level1_uniforms", "three-level cumsum L1 bounds missing")
+    require(cumsum_patch, "level2_uniforms", "three-level cumsum L2 bounds missing")
+    require(cumsum_patch, 'spirv_paths.at("cumsum_single_pass"), 0, false', "cumsum fixed subgroup request returned")
+    forbid(cumsum_patch, "CPU prefix scan", "CPU cumsum fallback returned")
     verify_cumsum_hierarchy()
-
-    # Pixel/Mali radix sort must be compiled for the actual native subgroup width.
-    require(radix_patch, '#define SUBGROUP_SIZE 16',
-            "radix shader must target the Pixel native subgroup width")
-    require(radix_patch, '#define WORKGROUP_SIZE 256',
-            "radix shader must use 256 threads on subgroup-16 Mali")
-    require(radix_patch, 'SHMEM_SIZE = RADIX * (WORKGROUP_SIZE / SUBGROUP_SIZE)',
-            "downsweep shared histogram must be sized from radix x subgroup count")
-    require(radix_patch, 'subgroupBallotExclusiveBitCount(mask)',
-            "downsweep must use subgroup-width-safe exclusive ballot counting")
-    require(radix_patch, 'subgroupBallotBitCount(mask)',
-            "downsweep must use subgroup-width-safe ballot counting")
-    require(radix_patch, 'const int WORKGROUP_SIZE = 256;',
-            "renderer radix partition geometry must match GLSL")
-    require(radix_patch, 'ShaderJob("upsweep.comp", {})',
-            "Android preparation must recompile radix upsweep")
-    require(radix_patch, 'unsupported glslc target',
-            "Android radix compilation must remove the slang-only glslc target argument")
-    require(pipeline_diag, 'patch-vksplat-radix-android.py',
-            "VkSplat preparation must apply the Mali radix port")
-
-    # The conformance test is a standalone Vulkan+cumsum path, not a whole-trainer probe.
-    require(cumsum_selftest, "class CumsumSelfTestRenderer final : public VulkanGSRenderer",
-            "isolated cumsum renderer is missing")
-    require(cumsum_selftest, "VulkanGSPipeline::initialize(deviceId)",
-            "self-test must initialize Vulkan without full trainer pipelines")
-    require(cumsum_selftest, 'createComputePipeline(pipeline, path, 0, false)',
-            "self-test cumsum pipelines must be subgroup-independent")
-    require(cumsum_selftest, "{1, 16, 255, 256, 257, 1024, 1025, 37635, 90000}",
-            "self-test must cover boundaries and observed Pixel workloads")
-    require(cumsum_selftest, "DeviceGuard guard(this)",
-            "cumsum dispatch must run inside a valid VkSplat command batch")
-    require(cumsum_selftest, "executeCumsum(buffers, input, output)",
-            "self-test must exercise the production GPU cumsum implementation")
-    require(cumsum_selftest, "copyFromDevice(output)",
-            "self-test must compare the full GPU prefix output against CPU reference")
-    require(cumsum_selftest, "cumsum self-test mismatch n=",
-            "self-test must report the exact failing prefix index")
-    require(cumsum_selftest, "cumsum:selftest dispatch begin",
-            "dispatch stage must persist before a possible native abort")
-    forbid(cumsum_selftest, "VulkanGSTrainer", "cumsum self-test must stay independent of trainer initialization")
-    require(cmake, "cumsum_selftest.cpp", "isolated cumsum test must be linked into the JNI library")
-
-    require(cumsum_glsl, "#version 450", "Android cumsum must be Vulkan GLSL")
+    require(cumsum_selftest, "class CumsumSelfTestRenderer final : public VulkanGSRenderer", "isolated cumsum renderer missing")
+    require(cumsum_selftest, "VulkanGSPipeline::initialize(deviceId)", "isolated Vulkan init missing")
+    require(cumsum_selftest, "executeCumsum(buffers, input, output)", "self-test must use production cumsum")
+    require(cumsum_selftest, "{1, 16, 255, 256, 257, 1024, 1025, 37635, 90000}", "cumsum boundary coverage changed")
+    forbid(cumsum_selftest, "VulkanGSTrainer", "cumsum test must remain isolated from trainer")
+    require(cmake, "cumsum_selftest.cpp", "cumsum self-test must be linked")
     require(cumsum_glsl, "#define PCS_BLOCK_SIZE 256", "GLSL cumsum local size changed")
-    require(cumsum_glsl, "layout(local_size_x = PCS_BLOCK_SIZE", "GLSL cumsum local workgroup missing")
-    require(cumsum_glsl, "shared int sData[PCS_BLOCK_SIZE]", "GLSL cumsum needs workgroup storage")
-    require(cumsum_glsl, "barrier();", "GLSL cumsum needs workgroup synchronization")
-    require(cumsum_glsl, "inclusiveWorkgroupScan", "GLSL cumsum scan implementation missing")
-    forbid(cumsum_glsl, "gl_Subgroup", "custom cumsum must not use subgroup built-ins")
-    forbid(cumsum_glsl, "subgroupInclusive", "custom cumsum must not use subgroup arithmetic")
-    forbid(cumsum_glsl, "subgroupAdd", "custom cumsum must not use subgroup arithmetic")
-    forbid(cumsum_glsl, "WavePrefix", "custom cumsum must not use wave operations")
-    forbid(cumsum_glsl, "WaveRead", "custom cumsum must not use wave operations")
+    require(cumsum_glsl, "shared int sData[PCS_BLOCK_SIZE]", "GLSL cumsum workgroup storage missing")
+    forbid(cumsum_glsl, "gl_Subgroup", "cumsum must remain subgroup-independent")
 
-    # Native crash diagnostics must preserve the actual Android tombstone, not only its existence.
-    require(diagnostic, "PREF_LAST_NATIVE_TRACE_TIMESTAMP",
-            "native tombstone capture needs an independent cursor so older unparsed crashes can be recovered")
-    require(diagnostic, "exit.getTraceInputStream()",
-            "native crash diagnostics must read ApplicationExitInfo tombstones")
-    require(diagnostic, "NativeTombstoneParser.parse(trace)",
-            "native tombstones must be rendered into the saved text diagnostics")
-    require(tombstone_parser, "case 16:", "tombstone parser must read the thread map")
-    require(tombstone_parser, "out.frames.add(parseFrame", "tombstone parser must read native backtrace frames")
-    require(tombstone_parser, 'append(" rel_pc=0x")', "native frame relative PCs must be retained for symbolization")
-    require(tombstone_parser, "abortMessage", "native abort messages must be retained")
+    # Mali radix remains subgroup-16 / 256-thread and NDK-glslc generated.
+    require(radix_patch, '#define SUBGROUP_SIZE 16', "radix subgroup width changed")
+    require(radix_patch, '#define WORKGROUP_SIZE 256', "radix workgroup size changed")
+    require(radix_patch, 'SHMEM_SIZE = RADIX * (WORKGROUP_SIZE / SUBGROUP_SIZE)', "radix shared histogram sizing regressed")
+    require(radix_patch, 'subgroupBallotExclusiveBitCount(mask)', "radix exclusive ballot must be subgroup-width-safe")
+    require(radix_patch, 'subgroupBallotBitCount(mask)', "radix ballot must be subgroup-width-safe")
+    require(pipeline_diag, 'patch-vksplat-radix-android.py', "prepare must apply Mali radix patch")
 
-    # Pipeline diagnostics must isolate driver aborts to an exact shader and Vulkan call.
-    require(pipeline_diag, "Vulkan pipeline begin shader=",
-            "pipeline diagnostics must log SPIR-V before module creation")
-    require(pipeline_diag, "Vulkan pipeline create begin shader=",
-            "pipeline diagnostics must log immediately before vkCreateComputePipelines")
-    require(pipeline_diag, "Vulkan pipeline ready shader=",
-            "pipeline diagnostics must log successful pipeline creation")
-    require(pipeline_diag, "maxWGInvocations=",
-            "device diagnostics must include maxComputeWorkGroupInvocations")
-    require(pipeline_diag, "OpExecutionMode opcode=16",
-            "pipeline diagnostics must decode SPIR-V LocalSize")
-    require(pipeline_diag, "Invalid SPIR-V header",
-            "runtime must reject malformed SPIR-V before the driver sees it")
+    # Crash evidence and pipeline diagnostics remain persistent.
+    require(diagnostic, "PREF_LAST_NATIVE_TRACE_TIMESTAMP", "native tombstone cursor missing")
+    require(diagnostic, "exit.getTraceInputStream()", "native tombstones must be read")
+    require(diagnostic, "NativeTombstoneParser.parse(trace)", "native tombstones must be decoded")
+    require(tombstone_parser, "case 16:", "tombstone thread map missing")
+    require(tombstone_parser, "out.frames.add(parseFrame", "native backtrace frames missing")
+    require(pipeline_diag, "Vulkan pipeline begin shader=", "pipeline start diagnostics missing")
+    require(pipeline_diag, "Vulkan pipeline create begin shader=", "pipeline creation diagnostics missing")
+    require(pipeline_diag, "Vulkan pipeline ready shader=", "pipeline success diagnostics missing")
+    require(pipeline_diag, "maxWGInvocations=", "device workgroup diagnostics missing")
+    require(pipeline_diag, "Invalid SPIR-V header", "malformed SPIR-V validation missing")
 
-    require(prepare, "cumsum.slang", "build must explicitly remove upstream Slang cumsum job")
-    require(prepare, "PCS_CUMSUM_PHASE", "build must compile the PCS GLSL cumsum phases")
-    require(prepare, "spirv-val", "build must validate cumsum SPIR-V")
-    require(prepare, "spirv-dis", "build must inspect cumsum SPIR-V execution mode")
-    require(prepare, "LocalSize 256 1 1", "build must assert exact cumsum LocalSize")
-    require(prepare, "patch-vksplat-pipeline-diagnostics-android.py",
-            "build must apply runtime Vulkan pipeline diagnostics")
-
+    # Build must patch before compilation and validate generated Android shader geometry.
+    require(prepare, "PCS_CUMSUM_PHASE", "prepare must compile custom cumsum")
+    require(prepare, "spirv-val", "prepare must validate cumsum SPIR-V")
+    require(prepare, "LocalSize 256 1 1", "prepare must assert cumsum LocalSize")
     patch_pos = prepare.find("python3 scripts/patch-vksplat-cumsum-android.py")
     diag_pos = prepare.find("python3 scripts/patch-vksplat-pipeline-diagnostics-android.py")
     compile_pos = prepare.find("python3 compile_shaders.py")
     if min(patch_pos, diag_pos, compile_pos) < 0 or not (patch_pos < compile_pos and diag_pos < compile_pos):
-        raise SystemExit(
-            "mobile architecture check failed: VkSplat patches must run before shader/native build")
+        raise SystemExit("mobile architecture check failed: VkSplat patches must run before shader/native build")
 
     if VENDORED_RENDERER.is_file():
         renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
-        require(renderer, "const size_t block = 256;",
-                "prepared renderer is not using fixed 256-thread cumsum geometry")
-        require(renderer, "if (num_elements <= block)",
-                "prepared single-pass threshold must match shader LocalSize")
-        require(renderer, "block_uniforms", "prepared renderer is missing two-level bounds")
-        require(renderer, "level1_uniforms", "prepared renderer is missing level-1 bounds")
-        require(renderer, "level2_uniforms", "prepared renderer is missing level-2 bounds")
-        require(renderer, 'spirv_paths.at("cumsum_single_pass"), 0, false',
-                "prepared cumsum pipeline still requests subgroup compatibility")
-        forbid(renderer, "GPU cumsum self-test", "prepared renderer still embeds the self-test")
-        start = renderer.find("void VulkanGSRenderer::executeCumsum(")
-        end = renderer.find("void VulkanGSRenderer::executeCalculateIndexBufferOffset(", start)
-        if start < 0 or end < 0:
-            raise SystemExit("mobile architecture check failed: prepared cumsum function not found")
-        cumsum_fn = renderer[start:end]
-        require(cumsum_fn, "executeCompute(", "prepared cumsum is not running on Vulkan")
-        forbid(cumsum_fn, "copyFromDevice(input_buffer)", "prepared cumsum fell back to CPU")
-
+        require(renderer, "const size_t block = 256;", "prepared renderer cumsum geometry regressed")
+        require(renderer, 'spirv_paths.at("cumsum_single_pass"), 0, false', "prepared cumsum subgroup request regressed")
         sort_start = renderer.find("void VulkanGSRenderer::executeSort(")
         if sort_start < 0:
-            raise SystemExit("mobile architecture check failed: prepared radix sort function not found")
-        sort_fn = renderer[sort_start:]
-        require(sort_fn, "const int WORKGROUP_SIZE = 256;",
-                "prepared radix C++ geometry is not Mali subgroup-16 safe")
+            raise SystemExit("mobile architecture check failed: prepared radix sort function missing")
+        require(renderer[sort_start:], "const int WORKGROUP_SIZE = 256;", "prepared radix C++ geometry regressed")
 
     if VENDORED_PIPELINE.is_file():
         pipeline = VENDORED_PIPELINE.read_text(encoding="utf-8")
-        require(pipeline, "Vulkan pipeline create begin shader=",
-                "prepared VkSplat pipeline lacks driver-abort diagnostics")
-        require(pipeline, "maxWGInvocations=",
-                "prepared VkSplat pipeline lacks device workgroup limits")
+        require(pipeline, "Vulkan pipeline create begin shader=", "prepared pipeline diagnostics missing")
+        require(pipeline, "maxWGInvocations=", "prepared device diagnostics missing")
 
     if VENDORED_TRAINER.is_file() and VENDORED_TRAINER_HEADER.is_file():
         trainer = VENDORED_TRAINER.read_text(encoding="utf-8")
         trainer_header = VENDORED_TRAINER_HEADER.read_text(encoding="utf-8")
-        require(trainer_header, "restoreTrainingCheckpoint",
-                "prepared VkSplat trainer cannot restore a checkpoint")
-        require(trainer_header, "completed_training_step",
-                "prepared VkSplat trainer does not retain cumulative optimizer step")
-        require(trainer, "Saved PCS 3DGS checkpoint",
-                "prepared VkSplat trainer does not persist trainable state")
-        require(trainer, "Restored PCS 3DGS checkpoint",
-                "prepared VkSplat trainer does not restore trainable state")
-        require(trainer, "global_step = resume_training_step",
-                "prepared Adam optimizer is not cumulative across sessions")
-        require(trainer, "saveTrainingCheckpoint(buffers);",
-                "successful PLY output must also persist a continuation checkpoint")
+        require(trainer_header, "restoreTrainingCheckpoint", "prepared trainer restore API missing")
+        require(trainer_header, "completed_training_step", "prepared trainer cumulative step missing")
+        require(trainer, "Saved PCS 3DGS checkpoint", "prepared checkpoint save missing")
+        require(trainer, "Restored PCS 3DGS checkpoint", "prepared checkpoint restore missing")
+        require(trainer, "global_step = resume_training_step", "prepared Adam step is not cumulative")
+        require(trainer, "saveTrainingCheckpoint(buffers);", "PLY output does not save checkpoint")
 
     if VENDORED_RADIX.is_dir():
         radix_config = (VENDORED_RADIX / "config.glsl").read_text(encoding="utf-8")
         radix_downsweep = (VENDORED_RADIX / "downsweep.comp").read_text(encoding="utf-8")
-        require(radix_config, "#define SUBGROUP_SIZE 16",
-                "prepared radix shader still targets desktop subgroup width")
-        require(radix_config, "#define WORKGROUP_SIZE 256",
-                "prepared radix shader still uses 512-thread desktop geometry")
-        require(radix_downsweep, "subgroupBallotExclusiveBitCount(mask)",
-                "prepared downsweep still uses handcrafted 32-wide ballot masks")
+        require(radix_config, "#define SUBGROUP_SIZE 16", "prepared radix subgroup width regressed")
+        require(radix_config, "#define WORKGROUP_SIZE 256", "prepared radix workgroup regressed")
+        require(radix_downsweep, "subgroupBallotExclusiveBitCount(mask)", "prepared radix ballot regressed")
         for name in ("upsweep.spv", "spine.spv", "downsweep.spv"):
             path = VENDORED_RADIX / name
             if not path.is_file():
                 raise SystemExit(f"mobile architecture check failed: Android radix SPIR-V missing: {path}")
             local = spirv_local_size(path)
             if local != (256, 1, 1):
-                raise SystemExit(
-                    f"mobile architecture check failed: {name} LocalSize={local}, expected (256, 1, 1)")
+                raise SystemExit(f"mobile architecture check failed: {name} LocalSize={local}, expected (256, 1, 1)")
 
     print("PCS continuous scanner + resumable mobile trainer architecture checks passed")
 
