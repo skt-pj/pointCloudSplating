@@ -6,6 +6,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
 JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
+SCANNER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ScannerActivity.java"
 CAPTURE = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetCaptureManager.java"
 CAMERA_CONFIG = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/CameraConfigSelector.java"
 FINALIZER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinalizer.java"
@@ -56,6 +57,7 @@ def verify_cumsum_hierarchy() -> None:
 def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
     java = JAVA.read_text(encoding="utf-8")
+    scanner = SCANNER.read_text(encoding="utf-8")
     capture = CAPTURE.read_text(encoding="utf-8")
     camera_config = CAMERA_CONFIG.read_text(encoding="utf-8")
     finalizer = FINALIZER.read_text(encoding="utf-8")
@@ -66,6 +68,15 @@ def main() -> None:
 
     # Continuous scanner invariants. Capturing a useful RGB frame must not interrupt SharedCamera's
     # repeating preview with a Camera2 still request or force the person holding the phone to stop.
+    require(scanner, "continuousCpuOnly=true",
+            "SharedCamera session must contain only ARCore surfaces during continuous capture")
+    forbid(scanner, "ImageReader.newInstance(",
+           "continuous capture must not allocate a legacy JPEG ImageReader")
+    forbid(scanner, "sessionSurfaces.add(jpegReader.getSurface())",
+           "continuous capture must not attach a legacy JPEG Surface")
+    forbid(scanner, "requestHighResolutionStill();",
+           "frame loop must not fall back to Camera2 still capture")
+
     require(capture, "frame.acquireCameraImage()",
             "scanner must sample RGB from the current ARCore frame")
     require(capture, '"arcore_cpu_yuv_continuous"',
