@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
-root = Path("app/src/main/cpp/third_party/vksplat/vksplat")
+checkout = Path("app/src/main/cpp/third_party/vksplat")
+root = checkout / "vksplat"
 config_path = root / "shader/radix_sort/config.glsl"
 downsweep_path = root / "shader/radix_sort/downsweep.comp"
 renderer_path = root / "src/gs_renderer.cpp"
+compiler_path = checkout / "compile_shaders.py"
 
 config = config_path.read_text()
 old_config = '''#define SUBGROUP_SIZE 32
@@ -119,4 +121,40 @@ if old_geometry not in renderer:
 renderer = renderer.replace(old_geometry, new_geometry, 1)
 renderer_path.write_text(renderer)
 
-print("Patched VkSplat radix sort for Mali native subgroup 16 and 256-thread workgroups")
+# prepare-vksplat-android.sh deliberately removes the upstream radix job because VkSplat's glslc
+# wrapper passes a slang-only '-target spirv' argument. Re-add the job after fixing that wrapper so
+# the Android NDK glslc recompiles all three radix shaders from the patched subgroup-16 GLSL.
+compiler = compiler_path.read_text()
+compile_anchor = '''        # Add target and other args
+        if target is not None:
+            cmd.extend(["-target", target])
+        cmd.extend(self.config.glslc_compile_args.split())
+'''
+compile_replacement = '''        # glslc emits SPIR-V directly for compute GLSL. '-target' is a slangc option and must not
+        # be forwarded to the Android NDK glslc path.
+        if target not in (None, "spirv"):
+            raise RuntimeError(f"unsupported glslc target: {target}")
+        cmd.extend(self.config.glslc_compile_args.split())
+'''
+if compile_anchor not in compiler:
+    raise SystemExit("radix glslc target patch anchor not found")
+compiler = compiler.replace(compile_anchor, compile_replacement, 1)
+
+job_anchor = '''        # Morton sorting Functions
+'''
+radix_job = '''        # Radix sort - Android recompiles this from subgroup-16 GLSL with NDK glslc.
+        jobs.append(("radix_sort", [
+            ShaderJob("upsweep.comp", {}),
+            ShaderJob("spine.comp", {}),
+            ShaderJob("downsweep.comp", {}),
+        ], []))
+
+'''
+if job_anchor not in compiler:
+    raise SystemExit("radix job insertion anchor not found")
+if 'ShaderJob("upsweep.comp", {})' in compiler:
+    raise SystemExit("radix job already present before Android patch")
+compiler = compiler.replace(job_anchor, radix_job + job_anchor, 1)
+compiler_path.write_text(compiler)
+
+print("Patched VkSplat radix sort for Mali native subgroup 16 and NDK glslc compilation")
