@@ -6,16 +6,18 @@ import android.content.res.AssetManager;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 
 /** JNI bridge for the PCS mobile-first Vulkan differentiable 3D Gaussian Splatting trainer. */
 public final class NativeGaussianTrainer {
     private static final String TAG = "Native3DGS";
     private static final String ASSET_ROOT = "vksplat_shader";
-    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_cpuscan_v4";
+    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_v5";
 
     // PocketGS demonstrates that the mobile operating regime is hundreds, not tens of thousands,
     // of iterations. Surface-aware initialization and bounded density control are designed around it.
@@ -84,7 +86,11 @@ public final class NativeGaussianTrainer {
             File shaderDir = ensureShaderFiles(context);
             DiagnosticLog.i(TAG,
                     "Using VkSplat shader cache=" + shaderDir.getName()
-                            + " cumsum=cpu_scan");
+                            + " cumsum=glslc256");
+            logCumsumShaderIdentity(shaderDir, "cumsum_single_pass.spv");
+            logCumsumShaderIdentity(shaderDir, "cumsum_block_scan.spv");
+            logCumsumShaderIdentity(shaderDir, "cumsum_scan_block_sums.spv");
+            logCumsumShaderIdentity(shaderDir, "cumsum_add_block_offsets.spv");
             File output = new File(dataset, "splat.ply");
             File working = prepared.root;
             int steps = trainingSteps(prepared.frameCount);
@@ -208,6 +214,31 @@ public final class NativeGaussianTrainer {
         copyAssetTree(context.getAssets(), ASSET_ROOT, root);
         if (!marker.isFile()) throw new IOException("VkSplat shader assets missing from APK");
         return root;
+    }
+
+    private static void logCumsumShaderIdentity(File shaderDir, String fileName) throws IOException {
+        File file = new File(new File(shaderDir, "generated"), fileName);
+        if (!file.isFile() || file.length() <= 0L) {
+            throw new IOException("VkSplat cumsum shader missing: " + fileName);
+        }
+        DiagnosticLog.i(TAG, "VkSplat cumsum shader=" + fileName
+                + " bytes=" + file.length() + " sha256=" + sha256(file));
+    }
+
+    private static String sha256(File file) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (InputStream input = new FileInputStream(file)) {
+                byte[] buffer = new byte[64 * 1024];
+                int n;
+                while ((n = input.read(buffer)) != -1) digest.update(buffer, 0, n);
+            }
+            StringBuilder out = new StringBuilder(64);
+            for (byte b : digest.digest()) out.append(String.format("%02x", b & 0xff));
+            return out.toString();
+        } catch (Exception error) {
+            throw new IOException("cannot hash VkSplat shader " + file.getName(), error);
+        }
     }
 
     private static void copyAssetTree(AssetManager assets, String assetPath, File destination)
