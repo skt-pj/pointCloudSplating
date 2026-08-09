@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Build-time architecture checks for the PCS Android mobile 3DGS trainer.
-
-These checks validate design invariants rather than a particular crash symptom. They keep the
-Android trainer in the mobile-first regime and make the VkSplat cumsum correctness patch part of
-the reproducible backend preparation.
-"""
+"""Build-time architecture checks for the PCS Android mobile scanner and 3DGS trainer."""
 from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = ROOT / "app/src/main/cpp/native_3dgs.cpp"
 JAVA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
+CAPTURE = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetCaptureManager.java"
+CAMERA_CONFIG = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/CameraConfigSelector.java"
+FINALIZER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinalizer.java"
+EXPORTER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ColmapDatasetExporter.java"
+MANIFEST = ROOT / "app/src/main/AndroidManifest.xml"
 CUMSUM_PATCH = ROOT / "scripts/patch-vksplat-cumsum-android.py"
 PREPARE = ROOT / "scripts/prepare-vksplat-android.sh"
 VENDORED_RENDERER = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/src/gs_renderer.cpp"
@@ -19,12 +19,12 @@ VENDORED_CUMSUM = ROOT / "app/src/main/cpp/third_party/vksplat/vksplat/slang/cum
 
 def require(text: str, needle: str, reason: str) -> None:
     if needle not in text:
-        raise SystemExit(f"mobile trainer architecture check failed: {reason}: missing {needle!r}")
+        raise SystemExit(f"mobile architecture check failed: {reason}: missing {needle!r}")
 
 
 def forbid(text: str, needle: str, reason: str) -> None:
     if needle in text:
-        raise SystemExit(f"mobile trainer architecture check failed: {reason}: found {needle!r}")
+        raise SystemExit(f"mobile architecture check failed: {reason}: found {needle!r}")
 
 
 def ceil_div(n: int, d: int) -> int:
@@ -32,9 +32,6 @@ def ceil_div(n: int, d: int) -> int:
 
 
 def verify_cumsum_hierarchy() -> None:
-    # VkSplat's block scan reduces one partial sum per subgroup using one subgroup-level prefix scan.
-    # Therefore a block may contain at most subgroup_size^2 threads. For Mali subgroup 16 this is
-    # 256 threads, not VkSplat desktop's 1024-thread block (which would create 64 partial sums).
     subgroup = 16
     block = subgroup * subgroup
     assert block == 256
@@ -52,21 +49,63 @@ def verify_cumsum_hierarchy() -> None:
             continue
         if n <= block * block * block:
             level2_alloc = ceil_div(level1_alloc, block)
-            level1_scan_uniform = level1_alloc
-            level2_scan_uniform = level2_alloc
-            level1_offset_uniform = level1_alloc
-            assert level2_scan_uniform <= block
-            assert level1_scan_uniform <= level1_alloc
-            assert level2_scan_uniform <= level2_alloc
-            assert level1_offset_uniform <= level1_alloc
+            assert level2_alloc <= block
+            assert level1_alloc <= level1_alloc
 
 
 def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
     java = JAVA.read_text(encoding="utf-8")
+    capture = CAPTURE.read_text(encoding="utf-8")
+    camera_config = CAMERA_CONFIG.read_text(encoding="utf-8")
+    finalizer = FINALIZER.read_text(encoding="utf-8")
+    exporter = EXPORTER.read_text(encoding="utf-8")
+    manifest = MANIFEST.read_text(encoding="utf-8")
     patch = CUMSUM_PATCH.read_text(encoding="utf-8")
     prepare = PREPARE.read_text(encoding="utf-8")
 
+    # Continuous scanner invariants. Capturing a useful RGB frame must not interrupt SharedCamera's
+    # repeating preview with a Camera2 still request or force the person holding the phone to stop.
+    require(capture, "frame.acquireCameraImage()",
+            "scanner must sample RGB from the current ARCore frame")
+    require(capture, '"arcore_cpu_yuv_continuous"',
+            "saved metadata must identify the continuous CPU-frame source")
+    require(capture, 'quality.put("motion_is_hard_gate", false)',
+            "motion may rank candidates but must not gate capture")
+    require(capture, "calculateSharpness",
+            "automatic keyframe selection must measure pixel sharpness")
+    require(capture, "flushBestCandidateLocked",
+            "scanner must select the best frame from a moving window")
+    forbid(capture, "MAX_LINEAR_SPEED_MPS",
+           "continuous capture must not require the user to slow below a threshold")
+    forbid(capture, "MAX_ANGULAR_SPEED_DPS",
+           "continuous capture must not require the user to stop rotating")
+    forbid(capture, "waiting for lower blur",
+           "scanner UI state must not wait for a stop-and-shoot moment")
+
+    require(camera_config, "MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L",
+            "ARCore CPU stream needs an explicit continuous-frame bandwidth budget")
+    require(camera_config, "max(Comparator",
+            "camera selection must prefer useful CPU-frame resolution")
+
+    require(finalizer, "if(capture==null)return null;",
+            "ARCore CPU frames must not be remapped through Camera2 still calibration")
+    require(finalizer, '"arcore_image_intrinsics"',
+            "continuous frames must retain exact ARCore image intrinsics")
+
+    require(exporter, "MAX_TRAIN_LONG_EDGE = 1000",
+            "training images must keep the established mobile memory envelope")
+    forbid(exporter, "TRAIN_DOWNSAMPLE",
+           "continuous source resolution must not be blindly divided by a legacy still factor")
+    require(exporter, "never upscale",
+            "training export must document adaptive source scaling")
+
+    require(manifest, 'android:icon="@mipmap/ic_launcher"',
+            "app must ship an explicit launcher icon")
+    require(manifest, 'android:roundIcon="@mipmap/ic_launcher"',
+            "app must ship a round/adaptive launcher icon")
+
+    # Mobile trainer invariants.
     require(native, "TrainerConfig::Strategy::MCMC", "density control must be budget-aware")
     require(native, "kGaussianBudget = 120'000", "Gaussian count must have an explicit budget")
     require(native, "kNormalNeighbors = 16", "surface normal initialization must use K=16")
@@ -85,11 +124,9 @@ def main() -> None:
 
     m = re.search(r"MAX_TRAIN_STEPS\s*=\s*([\d_]+)", java)
     if not m or int(m.group(1).replace("_", "")) > 1000:
-        raise SystemExit("mobile trainer architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
+        raise SystemExit("mobile architecture check failed: MAX_TRAIN_STEPS exceeds 1000")
 
-    # The patch file necessarily contains both the old and new text as replacement anchors. Validate
-    # that the intended subgroup-16 correction is present here, and validate absence only after the
-    # patch has been applied to the vendored source below.
+    # Mali subgroup-16 VkSplat cumsum invariants.
     require(patch, "deviceInfo.subgroupSize*deviceInfo.subgroupSize;",
             "renderer cumsum block replacement must use subgroup squared")
     require(patch, "SUBGROUP_SIZE*SUBGROUP_SIZE)",
@@ -105,7 +142,7 @@ def main() -> None:
     compile_pos = prepare.find("python3 compile_shaders.py")
     if patch_pos < 0 or compile_pos < 0 or patch_pos >= compile_pos:
         raise SystemExit(
-            "mobile trainer architecture check failed: cumsum source patch must run before shader compilation")
+            "mobile architecture check failed: cumsum source patch must run before shader compilation")
 
     if VENDORED_RENDERER.is_file():
         renderer = VENDORED_RENDERER.read_text(encoding="utf-8")
@@ -126,7 +163,7 @@ def main() -> None:
         require(cumsum, "if (laneId >= offset) {",
                 "prepared subgroup scan may read an invalid predecessor lane")
 
-    print("PCS mobile trainer architecture checks passed")
+    print("PCS continuous scanner + mobile trainer architecture checks passed")
 
 
 if __name__ == "__main__":
