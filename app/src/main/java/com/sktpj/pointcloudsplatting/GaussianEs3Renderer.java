@@ -21,6 +21,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private static final float MIN_DISPLAY_SCALE = 0.05f;
     private static final float MAX_DISPLAY_SCALE = 3.0f;
     private static final float CAMERA_FOV_DEGREES = 55f;
+    private static final float DEFAULT_PITCH_DEGREES = -10f;
     // position(3) + evaluated SH3 RGBA(4) + anisotropic scale(3) + quaternion(4)
     private static final int INSTANCE_FLOATS = 14;
     private static final int INSTANCE_STRIDE_BYTES = INSTANCE_FLOATS * Float.BYTES;
@@ -146,8 +147,8 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private int sizeScaleLocation;
     private int width = 1;
     private int height = 1;
-    private float yawDegrees;
-    private float pitchDegrees = -10f;
+    private final float[] orbitDirection = new float[3];
+    private final float[] cameraUp = new float[3];
     private float distance = 2.8f;
     private float baseDistance = 2.8f;
     private float targetX;
@@ -161,6 +162,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
 
     GaussianEs3Renderer(RendererStatusListener statusListener) {
         this.statusListener = statusListener;
+        resetOrientationLocked();
     }
 
     @Override
@@ -218,7 +220,8 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                             + " version=" + GLES30.glGetString(GLES30.GL_VERSION)
                             + " vendor=" + GLES30.glGetString(GLES30.GL_VENDOR)
                             + " viewer=ANISOTROPIC_COVARIANCE_SORTED_ES3"
-                            + " appearance=SH0_SH3_CPU_VIEW_EVAL");
+                            + " appearance=SH0_SH3_CPU_VIEW_EVAL"
+                            + " rotation=LOCAL_ORIENTATION_CONTINUOUS");
         } catch (RuntimeException e) {
             program = 0;
             DiagnosticLog.e(TAG, "Viewer GL initialization failed", e);
@@ -241,16 +244,24 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         GaussianModel current = model;
         if (current == null || current.gaussianCount == 0 || program == 0) return;
 
-        float yaw;
-        float pitch;
+        float cameraOrbitX;
+        float cameraOrbitY;
+        float cameraOrbitZ;
+        float cameraUpX;
+        float cameraUpY;
+        float cameraUpZ;
         float cameraDistance;
         float cameraTargetX;
         float cameraTargetY;
         float cameraTargetZ;
         float sizeScale;
         synchronized (this) {
-            yaw = yawDegrees;
-            pitch = pitchDegrees;
+            cameraOrbitX = orbitDirection[0];
+            cameraOrbitY = orbitDirection[1];
+            cameraOrbitZ = orbitDirection[2];
+            cameraUpX = cameraUp[0];
+            cameraUpY = cameraUp[1];
+            cameraUpZ = cameraUp[2];
             cameraDistance = distance;
             cameraTargetX = targetX;
             cameraTargetY = targetY;
@@ -258,14 +269,9 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
             sizeScale = displayScale;
         }
 
-        float yawRad = (float) Math.toRadians(yaw);
-        float pitchRad = (float) Math.toRadians(pitch);
-        float cosPitch = (float) Math.cos(pitchRad);
-        float eyeX = cameraTargetX
-                + cameraDistance * cosPitch * (float) Math.sin(yawRad);
-        float eyeY = cameraTargetY + cameraDistance * (float) Math.sin(pitchRad);
-        float eyeZ = cameraTargetZ
-                + cameraDistance * cosPitch * (float) Math.cos(yawRad);
+        float eyeX = cameraTargetX + cameraDistance * cameraOrbitX;
+        float eyeY = cameraTargetY + cameraDistance * cameraOrbitY;
+        float eyeZ = cameraTargetZ + cameraDistance * cameraOrbitZ;
 
         if (sortedUploadDirty) {
             uploadSortedInstances(
@@ -281,7 +287,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                 view, 0,
                 eyeX, eyeY, eyeZ,
                 cameraTargetX, cameraTargetY, cameraTargetZ,
-                0f, 1f, 0f);
+                cameraUpX, cameraUpY, cameraUpZ);
         Matrix.perspectiveM(
                 projection, 0, CAMERA_FOV_DEGREES,
                 (float) width / (float) height, 0.05f, 30f);
@@ -332,7 +338,8 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                             Locale.US,
                             "First model draw succeeded gaussians=%d sizeScale=%.3f "
                                     + "viewer=ANISOTROPIC_COVARIANCE_SORTED_ES3 "
-                                    + "appearance=SH0_SH3_CPU_VIEW_EVAL alpha=BACK_TO_FRONT",
+                                    + "appearance=SH0_SH3_CPU_VIEW_EVAL alpha=BACK_TO_FRONT "
+                                    + "rotation=LOCAL_ORIENTATION_CONTINUOUS",
                             current.gaussianCount, sizeScale));
             statusListener.onStatus(
                     "3Dモデルを表示中\n1本指で回転 / 2本指で移動 / ピンチで拡大・縮小");
@@ -498,8 +505,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         synchronized (this) {
             baseDistance = 2.8f;
             distance = baseDistance;
-            yawDegrees = 0f;
-            pitchDegrees = -10f;
+            resetOrientationLocked();
             targetX = 0f;
             targetY = 0f;
             targetZ = 0f;
@@ -516,30 +522,72 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     }
 
     synchronized void rotate(float dxPixels, float dyPixels) {
-        float degreesPerPixel = 360f / Math.max(1f, height);
-        yawDegrees = (yawDegrees - dxPixels * degreesPerPixel) % 360f;
-        pitchDegrees = Math.max(
-                -85f,
-                Math.min(85f, pitchDegrees - dyPixels * degreesPerPixel));
+        if (model == null
+                || !Float.isFinite(dxPixels)
+                || !Float.isFinite(dyPixels)) {
+            return;
+        }
+
+        float radiansPerPixel = (float) Math.toRadians(360f / Math.max(1f, height));
+
+        // Horizontal movement rotates around the CURRENT screen-up axis. This is deliberately
+        // not a fixed world-Y yaw: after the finger is lifted and placed again, the next drag
+        // continues from the orientation already visible on screen.
+        float horizontalAngle = -dxPixels * radiansPerPixel;
+        if (horizontalAngle != 0f) {
+            rotateVectorAroundAxis(
+                    orbitDirection,
+                    cameraUp[0], cameraUp[1], cameraUp[2],
+                    horizontalAngle);
+        }
+
+        // Vertical movement rotates around the CURRENT screen-right axis. Recompute right after
+        // horizontal rotation so diagonal drags also remain relative to the current orientation.
+        float forwardX = -orbitDirection[0];
+        float forwardY = -orbitDirection[1];
+        float forwardZ = -orbitDirection[2];
+        float rightX = forwardY * cameraUp[2] - forwardZ * cameraUp[1];
+        float rightY = forwardZ * cameraUp[0] - forwardX * cameraUp[2];
+        float rightZ = forwardX * cameraUp[1] - forwardY * cameraUp[0];
+        float rightLength = length(rightX, rightY, rightZ);
+        if (rightLength > 1e-6f) {
+            float invRight = 1f / rightLength;
+            rightX *= invRight;
+            rightY *= invRight;
+            rightZ *= invRight;
+
+            float verticalAngle = dyPixels * radiansPerPixel;
+            if (verticalAngle != 0f) {
+                rotateVectorAroundAxis(
+                        orbitDirection,
+                        rightX, rightY, rightZ,
+                        verticalAngle);
+                rotateVectorAroundAxis(
+                        cameraUp,
+                        rightX, rightY, rightZ,
+                        verticalAngle);
+            }
+        }
+
+        orthonormalizeCameraBasisLocked();
         sortedUploadDirty = true;
     }
 
     synchronized void pan(float dxPixels, float dyPixels) {
         if (model == null || !Float.isFinite(dxPixels) || !Float.isFinite(dyPixels)) return;
 
-        float yawRad = (float) Math.toRadians(yawDegrees);
-        float pitchRad = (float) Math.toRadians(pitchDegrees);
-        float sinYaw = (float) Math.sin(yawRad);
-        float cosYaw = (float) Math.cos(yawRad);
-        float sinPitch = (float) Math.sin(pitchRad);
-        float cosPitch = (float) Math.cos(pitchRad);
-
-        float rightX = cosYaw;
-        float rightY = 0f;
-        float rightZ = -sinYaw;
-        float upX = -sinYaw * sinPitch;
-        float upY = cosPitch;
-        float upZ = -cosYaw * sinPitch;
+        float forwardX = -orbitDirection[0];
+        float forwardY = -orbitDirection[1];
+        float forwardZ = -orbitDirection[2];
+        float rightX = forwardY * cameraUp[2] - forwardZ * cameraUp[1];
+        float rightY = forwardZ * cameraUp[0] - forwardX * cameraUp[2];
+        float rightZ = forwardX * cameraUp[1] - forwardY * cameraUp[0];
+        float rightLength = length(rightX, rightY, rightZ);
+        if (rightLength <= 1e-6f) return;
+        float invRight = 1f / rightLength;
+        rightX *= invRight;
+        rightY *= invRight;
+        rightZ *= invRight;
 
         float worldPerPixel = 2f * distance
                 * (float) Math.tan(Math.toRadians(CAMERA_FOV_DEGREES * 0.5f))
@@ -547,9 +595,9 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         float horizontal = -dxPixels * worldPerPixel;
         float vertical = dyPixels * worldPerPixel;
 
-        targetX += rightX * horizontal + upX * vertical;
-        targetY += rightY * horizontal + upY * vertical;
-        targetZ += rightZ * horizontal + upZ * vertical;
+        targetX += rightX * horizontal + cameraUp[0] * vertical;
+        targetY += rightY * horizontal + cameraUp[1] * vertical;
+        targetZ += rightZ * horizontal + cameraUp[2] * vertical;
         sortedUploadDirty = true;
     }
 
@@ -562,13 +610,97 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     }
 
     synchronized void resetCamera() {
-        yawDegrees = 0f;
-        pitchDegrees = -10f;
+        resetOrientationLocked();
         distance = baseDistance;
         targetX = 0f;
         targetY = 0f;
         targetZ = 0f;
         sortedUploadDirty = true;
+    }
+
+    private void resetOrientationLocked() {
+        float pitch = (float) Math.toRadians(DEFAULT_PITCH_DEGREES);
+        float sinPitch = (float) Math.sin(pitch);
+        float cosPitch = (float) Math.cos(pitch);
+        orbitDirection[0] = 0f;
+        orbitDirection[1] = sinPitch;
+        orbitDirection[2] = cosPitch;
+        cameraUp[0] = 0f;
+        cameraUp[1] = cosPitch;
+        cameraUp[2] = -sinPitch;
+    }
+
+    private void orthonormalizeCameraBasisLocked() {
+        normalizeInPlace(orbitDirection, 0f, 0f, 1f);
+
+        float forwardX = -orbitDirection[0];
+        float forwardY = -orbitDirection[1];
+        float forwardZ = -orbitDirection[2];
+        float rightX = forwardY * cameraUp[2] - forwardZ * cameraUp[1];
+        float rightY = forwardZ * cameraUp[0] - forwardX * cameraUp[2];
+        float rightZ = forwardX * cameraUp[1] - forwardY * cameraUp[0];
+        float rightLength = length(rightX, rightY, rightZ);
+        if (rightLength <= 1e-6f) {
+            resetOrientationLocked();
+            return;
+        }
+        float invRight = 1f / rightLength;
+        rightX *= invRight;
+        rightY *= invRight;
+        rightZ *= invRight;
+
+        cameraUp[0] = rightY * forwardZ - rightZ * forwardY;
+        cameraUp[1] = rightZ * forwardX - rightX * forwardZ;
+        cameraUp[2] = rightX * forwardY - rightY * forwardX;
+        normalizeInPlace(cameraUp, 0f, 1f, 0f);
+    }
+
+    private static void rotateVectorAroundAxis(
+            float[] vector,
+            float axisX, float axisY, float axisZ,
+            float angleRadians) {
+        float axisLength = length(axisX, axisY, axisZ);
+        if (axisLength <= 1e-6f || !Float.isFinite(angleRadians)) return;
+        float invAxis = 1f / axisLength;
+        axisX *= invAxis;
+        axisY *= invAxis;
+        axisZ *= invAxis;
+
+        float x = vector[0];
+        float y = vector[1];
+        float z = vector[2];
+        float cos = (float) Math.cos(angleRadians);
+        float sin = (float) Math.sin(angleRadians);
+        float oneMinusCos = 1f - cos;
+        float dot = axisX * x + axisY * y + axisZ * z;
+
+        vector[0] = x * cos
+                + (axisY * z - axisZ * y) * sin
+                + axisX * dot * oneMinusCos;
+        vector[1] = y * cos
+                + (axisZ * x - axisX * z) * sin
+                + axisY * dot * oneMinusCos;
+        vector[2] = z * cos
+                + (axisX * y - axisY * x) * sin
+                + axisZ * dot * oneMinusCos;
+    }
+
+    private static void normalizeInPlace(float[] vector, float fallbackX, float fallbackY, float fallbackZ) {
+        float vectorLength = length(vector[0], vector[1], vector[2]);
+        if (vectorLength <= 1e-6f) {
+            vector[0] = fallbackX;
+            vector[1] = fallbackY;
+            vector[2] = fallbackZ;
+            return;
+        }
+        float inv = 1f / vectorLength;
+        vector[0] *= inv;
+        vector[1] *= inv;
+        vector[2] *= inv;
+    }
+
+    private static float length(float x, float y, float z) {
+        return (float) Math.sqrt(x * x + y * y + z * z);
     }
 
     private int requireAttribute(String name) {
