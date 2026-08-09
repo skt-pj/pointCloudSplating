@@ -530,20 +530,21 @@ bool trainOneStep(VulkanGSTrainer& trainer,
                   VulkanGSRendererUniforms& uniforms,
                   VulkanGSPipelineBuffers& buffers,
                   size_t imageIndex,
-                  int step) {
+                  int localStep,
+                  uint32_t cumulativeStep) {
     trainer.get_train_camera(imageIndex, uniforms);
     const int shInterval = std::max(1, config.max_steps / 4);
-    uniforms.active_sh = static_cast<uint32_t>(std::min(step / shInterval, 3));
-    uniforms.step = static_cast<uint32_t>(step);
+    uniforms.active_sh = static_cast<uint32_t>(std::min<int>(cumulativeStep / shInterval, 3));
+    uniforms.step = cumulativeStep;
 
-    const bool validate = step == 0 || (step + 1) % 100 == 0;
+    const bool validate = localStep == 0 || (localStep + 1) % 100 == 0;
     auto guard = DeviceGuard(&trainer);
     forward(trainer, uniforms, buffers, validate);
     if (buffers.num_indices == 0) return false;
     trainer.executeComputeSSIMGradient(config, uniforms, buffers, imageIndex);
     trainer.executeRasterizeBackward(uniforms, buffers);
-    trainer.executeFusedProjectionBackwardOptimizerStep(config, uniforms, buffers, step + 1);
-    trainer.executeMCMCPostBackward(config, uniforms, buffers, step);
+    trainer.executeFusedProjectionBackwardOptimizerStep(config, uniforms, buffers, localStep + 1);
+    trainer.executeMCMCPostBackward(config, uniforms, buffers, localStep);
     if (buffers.num_splats > static_cast<size_t>(config.cap_max)) {
         throw std::runtime_error("MCMC exceeded configured Gaussian budget");
     }
@@ -556,7 +557,7 @@ double validationPsnr(VulkanGSTrainer& trainer,
     if (trainer.num_val() == 0) return NAN;
     trainer.get_val_camera(0, uniforms);
     uniforms.active_sh = 3;
-    uniforms.step = 0;
+    uniforms.step = trainer.getCompletedTrainingSteps();
     {
         auto guard = DeviceGuard(&trainer);
         forward(trainer, uniforms, buffers, true);
@@ -590,11 +591,15 @@ std::string deviceName(VulkanGSTrainer& trainer) {
     return "Vulkan device";
 }
 
-std::string successJson(size_t count, int steps, int optimizedSteps,
-                        double psnr, const std::string& device, size_t peakBytes) {
+std::string successJson(size_t count, uint32_t cumulativeSteps, int addedSteps,
+                        int optimizedSteps, bool resumed, double psnr,
+                        const std::string& device, size_t peakBytes) {
     std::ostringstream out;
     out << "{\"success\":true,\"message\":\"mobile 3DGS training complete\",\"gaussian_count\":"
-        << count << ",\"steps\":" << steps << ",\"optimized_steps\":" << optimizedSteps
+        << count << ",\"steps\":" << cumulativeSteps
+        << ",\"added_steps\":" << addedSteps
+        << ",\"optimized_steps\":" << optimizedSteps
+        << ",\"resumed\":" << (resumed ? "true" : "false")
         << ",\"gaussian_budget\":" << kGaussianBudget
         << ",\"peak_vram_mb\":" << (peakBytes / (1024.0 * 1024.0))
         << ",\"strategy\":\"bounded_mcmc\",\"initialization\":\"surface_knn_16_3\""
@@ -629,12 +634,13 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
     ProgressCallback progress(env, listener);
 
     try {
+        const int steps = std::max(1, static_cast<int>(trainSteps));
         progress.send(1, "Vulkan学習器を開始しています…");
         VulkanGSTrainer trainer;
         VulkanGSPipelineBuffers buffers;
         VulkanGSRendererUniforms uniforms{};
         TrainerConfig config = makeConfig(dataRoot, imageDir, sparseDir, outputPly,
-                                          static_cast<int>(frameCount), static_cast<int>(trainSteps));
+                                          static_cast<int>(frameCount), steps);
 
         trainer.initialize(makeShaderPaths(shaderDir), -1);
         std::string gpu = deviceName(trainer);
@@ -645,32 +651,49 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
         if (trainer.num_train() == 0) throw std::runtime_error("no training camera views");
         if (buffers.num_splats < 64) throw std::runtime_error("initial 3D points are insufficient");
 
-        spatialBudgetInitialCloud(trainer, buffers, kInitialGaussianBudget);
-        progress.send(7, "Depthから表面方向を推定しています…");
-        initializeSurfaceGaussians(trainer, buffers);
+        const bool resumed = trainer.restoreTrainingCheckpoint(buffers);
+        const uint32_t completedBeforeRun = trainer.getResumeTrainingStep();
+        if (resumed) {
+            progress.send(7, "保存したGaussian・optimizer状態を復元しました…");
+            logi("Training checkpoint restored steps=" + std::to_string(completedBeforeRun)
+                 + " gaussians=" + std::to_string(buffers.num_splats));
+        } else {
+            spatialBudgetInitialCloud(trainer, buffers, kInitialGaussianBudget);
+            progress.send(7, "Depthから表面方向を推定しています…");
+            initializeSurfaceGaussians(trainer, buffers);
+        }
 
         {
             std::ostringstream info;
             info << "Training start views=" << trainer.num_train() << " initial=" << buffers.num_splats
-                 << " steps=" << trainSteps << " loss=L1+SSIM strategy=bounded_mcmc"
+                 << " additionalSteps=" << steps << " resumeStep=" << completedBeforeRun
+                 << " loss=L1+SSIM strategy=bounded_mcmc"
                  << " gaussianBudget=" << config.cap_max
                  << " tileBudgetMB=" << (kTileWorkingSetBudgetBytes >> 20)
-                 << " surfaceInit=K" << kNormalNeighbors << "/K" << kScaleNeighbors;
+                 << " surfaceInit=" << (resumed ? "checkpoint" : "K16/K3");
             logi(info.str());
         }
 
-        const int steps = std::max(300, static_cast<int>(trainSteps));
         int optimizedSteps = 0;
+        const uint64_t targetStep = static_cast<uint64_t>(completedBeforeRun)
+                + static_cast<uint64_t>(steps);
+        if (targetStep > UINT32_MAX) throw std::runtime_error("cumulative training step overflow");
+
         for (int step = 0; step < steps; ++step) {
-            size_t imageIndex = static_cast<size_t>(step) % trainer.num_train();
-            if (trainOneStep(trainer, config, uniforms, buffers, imageIndex, step)) optimizedSteps++;
+            const uint32_t cumulativeStep = completedBeforeRun + static_cast<uint32_t>(step);
+            size_t imageIndex = static_cast<size_t>(cumulativeStep) % trainer.num_train();
+            if (trainOneStep(trainer, config, uniforms, buffers, imageIndex, step, cumulativeStep)) {
+                optimizedSteps++;
+            }
             if (step == 0 || (step + 1) % 50 == 0 || step + 1 == steps) {
                 int percent = 10 + static_cast<int>(85.0 * (step + 1) / steps);
+                const uint32_t current = completedBeforeRun + static_cast<uint32_t>(step + 1);
                 std::ostringstream message;
-                message << "端末向け3DGSを最適化しています… " << (step + 1) << "/" << steps;
+                message << "端末向け3DGSを最適化しています… " << current << "/" << targetStep;
                 progress.send(percent, message.str());
                 std::ostringstream log;
-                log << "step=" << (step + 1) << "/" << steps
+                log << "step=" << current << "/" << targetStep
+                    << " added=" << (step + 1) << "/" << steps
                     << " optimized=" << optimizedSteps
                     << " gaussians=" << buffers.num_splats
                     << " tileIndices=" << buffers.num_indices
@@ -680,29 +703,37 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
             }
         }
 
-        const int minOptimizedSteps = std::max(200, steps * 3 / 4);
+        const int minOptimizedSteps = std::max(1, steps * 3 / 4);
         if (optimizedSteps < minOptimizedSteps) {
             std::ostringstream error;
             error << "insufficient projected training steps: optimized=" << optimizedSteps
-                  << " required=" << minOptimizedSteps << " total=" << steps
+                  << " required=" << minOptimizedSteps << " added=" << steps
                   << ". Check camera pose/intrinsics and geometry coverage.";
             throw std::runtime_error(error.str());
         }
 
         progress.send(96, "学習結果を確認しています…");
         double psnr = validationPsnr(trainer, uniforms, buffers);
-        progress.send(98, "3DGSモデルを書き出しています…");
+        progress.send(98, "3DGSモデルと追加学習checkpointを書き出しています…");
         const size_t finalCount = buffers.num_splats;
         const size_t peakBytes = trainer.getPeakAllocSize();
         trainer.writePLY(outputPly, buffers);
+        const uint32_t cumulativeSteps = trainer.getCompletedTrainingSteps();
+        if (cumulativeSteps != static_cast<uint32_t>(targetStep)) {
+            throw std::runtime_error("checkpoint cumulative step mismatch");
+        }
         logi("Training COMPLETE gaussians=" + std::to_string(finalCount)
+             + " totalSteps=" + std::to_string(cumulativeSteps)
+             + " addedSteps=" + std::to_string(steps)
+             + " resumed=" + std::string(resumed ? "true" : "false")
              + " optimizedSteps=" + std::to_string(optimizedSteps)
              + " peakMB=" + std::to_string(peakBytes / (1024.0 * 1024.0))
              + " psnr=" + (std::isfinite(psnr) ? std::to_string(psnr) : std::string("n/a")));
         trainer.cleanupBuffers(buffers);
         trainer.cleanup();
-        progress.send(100, "3DGS学習が完了しました");
-        std::string json = successJson(finalCount, steps, optimizedSteps, psnr, gpu, peakBytes);
+        progress.send(100, resumed ? "3DGS追加学習が完了しました" : "3DGS学習が完了しました");
+        std::string json = successJson(finalCount, cumulativeSteps, steps, optimizedSteps,
+                                       resumed, psnr, gpu, peakBytes);
         return env->NewStringUTF(json.c_str());
     } catch (const std::exception& error) {
         loge(std::string("3DGS training failed: ") + error.what());
