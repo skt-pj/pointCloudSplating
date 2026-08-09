@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import runpy
 
 path = Path("app/src/main/cpp/third_party/vksplat/vksplat/src/gs_pipeline.cpp")
 s = path.read_text()
@@ -42,3 +43,7 @@ s = s.replace(create_anchor, create_replacement, 1)
 
 path.write_text(s)
 print("Patched VkSplat Vulkan pipeline creation with Android diagnostics")
+
+# The command-batch patch depends on the Android log macros injected above, so keep the ordering
+# explicit in one entry point used by the build.
+runpy.run_path("scripts/patch-vksplat-command-batch-android.py", run_name="__main__")
