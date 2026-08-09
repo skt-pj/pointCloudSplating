@@ -31,7 +31,7 @@ import java.util.Map;
 /** Converts the app's saved camera dataset into the COLMAP camera format consumed by VkSplat. */
 public final class ColmapDatasetExporter {
     private static final String TAG = "ColmapExport";
-    private static final int TRAIN_DOWNSAMPLE = 4;
+    private static final int MAX_TRAIN_LONG_EDGE = 1000;
     private static final float VOXEL_METERS = 0.008f;
     private static final int MAX_INITIAL_POINTS = 220_000;
     private static final int VOXEL_BITS = 21;
@@ -90,7 +90,7 @@ public final class ColmapDatasetExporter {
             File imagesFile = new File(sparseDir, "images.txt");
             try (BufferedWriter cameras = new BufferedWriter(new FileWriter(camerasFile));
                  BufferedWriter images = new BufferedWriter(new FileWriter(imagesFile))) {
-                cameras.write("# pointCloudSplating saved Camera2 intrinsics\n");
+                cameras.write("# pointCloudSplating saved ARCore CPU-frame intrinsics\n");
                 images.write("# Saved ARCore camera poses converted to COLMAP world-to-camera\n");
                 for (int i = 0; i < frames.length(); i++) {
                     JSONObject frame = frames.getJSONObject(i);
@@ -99,8 +99,11 @@ public final class ColmapDatasetExporter {
 
                     int sourceW = frame.getInt("w");
                     int sourceH = frame.getInt("h");
-                    int targetW = Math.max(320, sourceW / TRAIN_DOWNSAMPLE);
-                    int targetH = Math.max(240, sourceH / TRAIN_DOWNSAMPLE);
+                    double trainingScale = Math.min(
+                            1.0,
+                            (double) MAX_TRAIN_LONG_EDGE / Math.max(sourceW, sourceH));
+                    int targetW = Math.max(1, (int) Math.round(sourceW * trainingScale));
+                    int targetH = Math.max(1, (int) Math.round(sourceH * trainingScale));
                     File target = new File(imageDir, source.getName());
                     resizeJpeg(source, target, targetW, targetH);
 
@@ -162,11 +165,12 @@ public final class ColmapDatasetExporter {
             }
 
             JSONObject meta = new JSONObject();
-            meta.put("format_version", 1);
-            meta.put("source", "pointCloudSplating transforms.json + Camera2 JPEG + ARCore Raw Depth");
+            meta.put("format_version", 2);
+            meta.put("source", "pointCloudSplating continuous ARCore CPU RGB + ARCore Raw Depth");
             meta.put("frame_count", frames.length());
             meta.put("initial_point_count", points.size());
-            meta.put("training_image_scale", 1.0 / TRAIN_DOWNSAMPLE);
+            meta.put("training_image_policy",
+                    "preserve aspect ratio; max long edge " + MAX_TRAIN_LONG_EDGE + " px; never upscale");
             meta.put("training_image_dir", "images_4");
             meta.put("coordinate_system", "datasetRootAnchor; OpenGL c2w converted to COLMAP w2c");
             writeText(new File(root, "export.json"), meta.toString(2));
