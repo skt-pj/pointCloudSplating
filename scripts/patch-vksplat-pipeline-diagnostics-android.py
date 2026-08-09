@@ -44,6 +44,10 @@ s = s.replace(create_anchor, create_replacement, 1)
 path.write_text(s)
 print("Patched VkSplat Vulkan pipeline creation with Android diagnostics")
 
+# Apply the Mali radix port while the vendored source tree is still being prepared. This also
+# restores the radix GLSL jobs using the Android NDK glslc path after prepare removed the desktop job.
+runpy.run_path("scripts/patch-vksplat-radix-android.py", run_name="__main__")
+
 # The command-batch patch depends on the Android log macros injected above, so keep the ordering
 # explicit in one entry point used by the build.
 runpy.run_path("scripts/patch-vksplat-command-batch-android.py", run_name="__main__")
