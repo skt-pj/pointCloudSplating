@@ -36,19 +36,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Continuously samples ARCore's CPU camera stream and automatically keeps the sharpest keyframe
- * for each short viewpoint window. No Camera2 still capture is issued while scanning, so the GPU
- * preview remains a continuous repeating stream while JPEG encoding happens on a writer thread.
+ * for each short viewpoint window. No Camera2 still capture is issued while scanning. CPU image
+ * copying, sharpness evaluation and JPEG encoding are kept off the GL preview thread.
  */
 public final class DatasetCaptureManager {
     private static final String TAG = "DatasetCapture";
 
-    // Sample several frames per short window, then keep only the sharpest one. The user is expected
-    // to keep moving; motion is a ranking hint, never a hard requirement to stop.
     private static final long CANDIDATE_INTERVAL_NS = 110_000_000L;
     private static final long SELECTION_WINDOW_NS = 420_000_000L;
     private static final long FORCE_KEYFRAME_AFTER_NS = 1_300_000_000L;
@@ -65,7 +65,9 @@ public final class DatasetCaptureManager {
     private static final int SHARPNESS_SAMPLE_STEP = 3;
 
     private final File captureRoot;
+    private final ExecutorService selector = Executors.newSingleThreadExecutor();
     private final ExecutorService writer = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean candidateTaskInFlight = new AtomicBoolean();
     private final AtomicInteger captureSequence = new AtomicInteger();
     private final ArrayDeque<WorldPointCloudSnapshot> depthSamples = new ArrayDeque<>();
 
@@ -90,8 +92,6 @@ public final class DatasetCaptureManager {
 
     private String cameraId = "unknown";
     private Size legacyJpegSize;
-    private volatile int lastCpuWidth;
-    private volatile int lastCpuHeight;
 
     public DatasetCaptureManager(File externalPicturesDir) {
         if (externalPicturesDir == null) {
@@ -110,8 +110,7 @@ public final class DatasetCaptureManager {
 
     /**
      * ScannerActivity still creates a legacy JPEG surface as part of its SharedCamera session.
-     * Continuous capture no longer targets it, so keep that unused surface as small as possible to
-     * leave bandwidth for ARCore's higher-resolution CPU stream and the live preview.
+     * Continuous capture never targets it, so keep that unused surface as small as possible.
      */
     public static Size chooseJpegSize(CameraCharacteristics characteristics) {
         android.hardware.camera2.params.StreamConfigurationMap map = characteristics.get(
@@ -187,9 +186,9 @@ public final class DatasetCaptureManager {
     }
 
     /**
-     * Samples the camera image that already belongs to this ARCore frame. Returns false deliberately:
-     * ScannerActivity's old true path submits a Camera2 TEMPLATE_STILL_CAPTURE, which is precisely
-     * the preview-stalling behavior this continuous path replaces.
+     * Acquires the CPU image belonging to the current ARCore frame and immediately hands it to one
+     * bounded selector worker. The GL thread never converts YUV, computes sharpness or writes JPEG.
+     * Returning false deliberately prevents ScannerActivity's legacy TEMPLATE_STILL_CAPTURE path.
      */
     public synchronized boolean onArFrame(Frame frame, Camera camera, Pose rootPose) {
         if (!cameraActive || !captureEnabled) {
@@ -205,60 +204,41 @@ public final class DatasetCaptureManager {
         previousPose = localPose;
         previousFrameTimestampNs = frameTimestampNs;
 
-        if (bestCandidate != null && shouldCloseSelectionWindow(localPose, cameraTimestampNs)) {
-            flushBestCandidateLocked(false);
-        }
-
         if (bestCandidate == null && !hasUsefulViewpointChange(localPose, cameraTimestampNs)) {
             lastDecision = String.format(Locale.US,
                     "automatic capture tracking viewpoint %.2f m/s %.1f deg/s",
                     motion.linearSpeedMps, motion.angularSpeedDps);
             return false;
         }
-
         if (lastCandidateTimestampNs >= 0
                 && cameraTimestampNs - lastCandidateTimestampNs < CANDIDATE_INTERVAL_NS) {
+            return false;
+        }
+        if (!candidateTaskInFlight.compareAndSet(false, true)) {
+            // Never queue work faster than it can be evaluated. Preview wins over capture density.
             return false;
         }
         lastCandidateTimestampNs = cameraTimestampNs;
 
         Image image = null;
+        boolean handedOff = false;
         try {
             image = frame.acquireCameraImage();
-            YuvFrame yuv = copyCameraImage(image);
-            lastCpuWidth = yuv.width;
-            lastCpuHeight = yuv.height;
-            double sharpness = calculateSharpness(yuv.luma, yuv.width, yuv.height);
-            double score = rankFrame(sharpness, motion);
             PoseSample pose = PoseSample.from(cameraTimestampNs, camera, rootPose);
-            Candidate candidate = new Candidate(
+            CandidateSeed seed = new CandidateSeed(
                     cameraTimestampNs,
                     localPose,
                     pose,
-                    yuv,
-                    sharpness,
-                    score,
+                    image,
                     motion.linearSpeedMps,
                     motion.angularSpeedDps);
-
-            if (bestCandidate == null) {
-                bestCandidate = candidate;
-                selectionWindowPose = localPose;
-                selectionWindowStartNs = cameraTimestampNs;
-            } else if (candidate.score > bestCandidate.score) {
-                bestCandidate = candidate;
-            }
-
-            lastDecision = String.format(Locale.US,
-                    "automatic capture selecting sharp frame score=%.1f blur=%.1f",
-                    score, sharpness);
-
-            if (selectionWindowStartNs >= 0
-                    && cameraTimestampNs - selectionWindowStartNs >= SELECTION_WINDOW_NS) {
-                flushBestCandidateLocked(false);
-            }
+            selector.execute(() -> processCandidate(seed));
+            image = null;
+            handedOff = true;
         } catch (NotYetAvailableException e) {
             lastDecision = "automatic capture waiting for CPU camera frame";
+        } catch (RejectedExecutionException e) {
+            lastDecision = "automatic capture selector stopped";
         } catch (RuntimeException e) {
             lastDecision = "automatic capture frame unavailable";
             DiagnosticLog.w(TAG,
@@ -266,19 +246,74 @@ public final class DatasetCaptureManager {
                             + ": " + e.getMessage());
         } finally {
             if (image != null) image.close();
+            if (!handedOff) candidateTaskInFlight.set(false);
         }
         return false;
     }
 
-    // Legacy still-capture callbacks retained only so ScannerActivity's existing callback type stays
-    // source-compatible. The continuous path never intentionally reaches these methods.
+    private void processCandidate(CandidateSeed seed) {
+        try {
+            YuvFrame yuv = copyCameraImage(seed.image);
+            double sharpness = calculateSharpness(yuv.luma, yuv.width, yuv.height);
+            Motion motion = new Motion(seed.linearSpeedMps, seed.angularSpeedDps);
+            double score = rankFrame(sharpness, motion);
+            Candidate candidate = new Candidate(
+                    seed.timestampNs,
+                    seed.localPose,
+                    seed.pose,
+                    yuv,
+                    sharpness,
+                    score,
+                    seed.linearSpeedMps,
+                    seed.angularSpeedDps);
+
+            synchronized (this) {
+                if (!cameraActive) return;
+                if (bestCandidate != null
+                        && shouldCloseSelectionWindow(seed.localPose, seed.timestampNs)) {
+                    flushBestCandidateLocked(false);
+                }
+
+                if (bestCandidate == null) {
+                    bestCandidate = candidate;
+                    selectionWindowPose = seed.localPose;
+                    selectionWindowStartNs = seed.timestampNs;
+                } else if (candidate.score > bestCandidate.score) {
+                    bestCandidate = candidate;
+                }
+
+                lastDecision = String.format(Locale.US,
+                        "automatic capture selecting sharp frame score=%.1f sharpness=%.1f",
+                        score, sharpness);
+
+                if (selectionWindowStartNs >= 0
+                        && seed.timestampNs - selectionWindowStartNs >= SELECTION_WINDOW_NS) {
+                    flushBestCandidateLocked(false);
+                }
+            }
+        } catch (RuntimeException e) {
+            synchronized (this) {
+                lastDecision = "automatic capture selector failed";
+            }
+            DiagnosticLog.w(TAG,
+                    "Continuous frame selector failed: " + e.getClass().getSimpleName()
+                            + ": " + e.getMessage());
+        } finally {
+            try {
+                seed.image.close();
+            } catch (RuntimeException ignored) {
+            }
+            candidateTaskInFlight.set(false);
+        }
+    }
+
+    // Legacy still-capture callbacks stay source-compatible but are intentionally not used.
     public synchronized void onCaptureRequestFailed(String reason) {
         DiagnosticLog.w(TAG, "Unexpected legacy still failure: " + reason);
     }
 
     public synchronized void onCaptureCompleted(TotalCaptureResult result) {
-        // No-op: image quality is measured from pixels directly rather than using a stop-and-shoot
-        // exposure/focus gate.
+        // No-op: continuous frame quality is evaluated directly from the ARCore CPU image.
     }
 
     public void onJpegAvailable(ImageReader reader) {
@@ -297,21 +332,29 @@ public final class DatasetCaptureManager {
     public boolean stopCaptureAndFlush(long timeoutMs) {
         final long deadline = System.currentTimeMillis() + Math.max(1L, timeoutMs);
         synchronized (this) {
+            // Stop scheduling new candidates. Any candidate already handed to the selector is still
+            // allowed to finish and can become the final saved keyframe.
             captureEnabled = false;
-            flushBestCandidateLocked(true);
-            queueFallbackDepthPriorsLocked();
             lastDecision = "capture stopped; finalizing";
         }
 
-        long remaining = Math.max(1L, deadline - System.currentTimeMillis());
         try {
+            long remaining = Math.max(1L, deadline - System.currentTimeMillis());
+            selector.submit(() -> {}).get(remaining, TimeUnit.MILLISECONDS);
+
+            synchronized (this) {
+                flushBestCandidateLocked(true);
+                queueFallbackDepthPriorsLocked();
+            }
+
+            remaining = Math.max(1L, deadline - System.currentTimeMillis());
             writer.submit(() -> {}).get(remaining, TimeUnit.MILLISECONDS);
             synchronized (this) {
                 lastDecision = "capture stopped; ready to save";
             }
             return true;
         } catch (Exception e) {
-            DiagnosticLog.w(TAG, "Timed out flushing continuous capture writer: " + e.getMessage());
+            DiagnosticLog.w(TAG, "Timed out flushing continuous capture pipeline: " + e.getMessage());
             synchronized (this) {
                 lastDecision = "save timed out flushing files";
             }
@@ -325,6 +368,15 @@ public final class DatasetCaptureManager {
     }
 
     public void shutdown() {
+        synchronized (this) {
+            captureEnabled = false;
+        }
+        selector.shutdown();
+        try {
+            selector.awaitTermination(500L, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         synchronized (this) {
             flushBestCandidateLocked(true);
         }
@@ -484,6 +536,7 @@ public final class DatasetCaptureManager {
         quality.put("selection_window_ns", SELECTION_WINDOW_NS);
         quality.put("jpeg_quality", JPEG_QUALITY);
         quality.put("max_depth_match_delta_ns", MAX_DEPTH_MATCH_DELTA_NS);
+        quality.put("quality_processing_thread", "background_selector");
         json.put("capture_quality_gate", quality);
         json.put("camera2_capture", JSONObject.NULL);
 
@@ -562,7 +615,7 @@ public final class DatasetCaptureManager {
             json.put("rgb_observation_policy",
                     "Continuous moving capture; choose the sharpest frame per short viewpoint window; no Camera2 still request");
             json.put("preview_policy",
-                    "Never interrupt the ARCore repeating preview for texture photography");
+                    "Never interrupt the ARCore repeating preview for texture photography; frame quality work runs on a background selector");
             try (FileOutputStream out = new FileOutputStream(
                     new File(captureRoot, "session_camera.json"))) {
                 out.write(json.toString(2).getBytes(StandardCharsets.UTF_8));
@@ -615,8 +668,7 @@ public final class DatasetCaptureManager {
     }
 
     private static double rankFrame(double sharpness, Motion motion) {
-        // Pixel sharpness is authoritative. Motion only breaks close ties; it is never a rejection
-        // gate and therefore never asks the user to stop moving.
+        // Pixel sharpness is authoritative. Motion only breaks close ties and never rejects a frame.
         double motionPenalty = 1.0
                 + Math.min(1.5, motion.linearSpeedMps * 0.45)
                 + Math.min(1.5, motion.angularSpeedDps * 0.012);
@@ -661,7 +713,6 @@ public final class DatasetCaptureManager {
         int chromaHeight = (height + 1) / 2;
         byte[] nv21 = new byte[width * height + 2 * chromaWidth * chromaHeight];
         System.arraycopy(luma, 0, nv21, 0, luma.length);
-
         copyChromaInterleaved(
                 image.getPlanes()[2],
                 image.getPlanes()[1],
@@ -805,6 +856,30 @@ public final class DatasetCaptureManager {
         final float angularSpeedDps;
 
         Motion(float linearSpeedMps, float angularSpeedDps) {
+            this.linearSpeedMps = linearSpeedMps;
+            this.angularSpeedDps = angularSpeedDps;
+        }
+    }
+
+    private static final class CandidateSeed {
+        final long timestampNs;
+        final Pose localPose;
+        final PoseSample pose;
+        final Image image;
+        final float linearSpeedMps;
+        final float angularSpeedDps;
+
+        CandidateSeed(
+                long timestampNs,
+                Pose localPose,
+                PoseSample pose,
+                Image image,
+                float linearSpeedMps,
+                float angularSpeedDps) {
+            this.timestampNs = timestampNs;
+            this.localPose = localPose;
+            this.pose = pose;
+            this.image = image;
             this.linearSpeedMps = linearSpeedMps;
             this.angularSpeedDps = angularSpeedDps;
         }
