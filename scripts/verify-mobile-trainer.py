@@ -76,6 +76,12 @@ def main() -> None:
            "continuous capture must not attach a legacy JPEG Surface")
     forbid(scanner, "requestHighResolutionStill();",
            "frame loop must not fall back to Camera2 still capture")
+    require(scanner, "surfaceView.setPreserveEGLContextOnPause(true)",
+            "resumable SharedCamera scans must preserve the camera EGL texture")
+    require(scanner, "releaseGlForModel",
+            "EGL context should be released only when model processing needs the GPU")
+    require(scanner, 'append("lastModelError=")',
+            "3DGS failure reason must remain visible in copied diagnostics")
 
     require(capture, "frame.acquireCameraImage()",
             "scanner must sample RGB from the current ARCore frame")
@@ -86,7 +92,15 @@ def main() -> None:
     require(capture, "calculateSharpness",
             "automatic keyframe selection must measure pixel sharpness")
     require(capture, "flushBestCandidateLocked",
-            "scanner must select the best frame from a moving window")
+            "scanner must select the best frame from each selection window")
+    require(capture, "SELECTION_WINDOW_NS = 750_000_000L",
+            "candidate images must compete in a fixed 750 ms selection window")
+    require(capture, "shouldCloseSelectionWindow(long timestampNs)",
+            "selection-window closure must be time based rather than movement triggered")
+    forbid(capture, "NEW_WINDOW_TRANSLATION_METERS",
+           "camera translation must not close the selection window early")
+    forbid(capture, "NEW_WINDOW_ROTATION_DEGREES",
+           "camera rotation must not close the selection window early")
     forbid(capture, "MAX_LINEAR_SPEED_MPS",
            "continuous capture must not require the user to slow below a threshold")
     forbid(capture, "MAX_ANGULAR_SPEED_DPS",
