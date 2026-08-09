@@ -15,7 +15,7 @@ import java.nio.charset.StandardCharsets;
 public final class NativeGaussianTrainer {
     private static final String TAG = "Native3DGS";
     private static final String ASSET_ROOT = "vksplat_shader";
-    private static final String SHADER_CACHE = "vksplat_shader_41cff93b";
+    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_cumsum256_v2";
 
     // PocketGS demonstrates that the mobile operating regime is hundreds, not tens of thousands,
     // of iterations. Surface-aware initialization and bounded density control are designed around it.
