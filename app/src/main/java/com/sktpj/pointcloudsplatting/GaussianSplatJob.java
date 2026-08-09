@@ -8,6 +8,7 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -17,6 +18,7 @@ public final class GaussianSplatJob {
     private static final String TAG = "GaussianSplatJob";
     private static final String FINAL_SPLAT = "splat.ply";
     private static final String CHECKPOINT_RELATIVE = "vksplat_data/3dgs_checkpoint.bin";
+    private static final String LEGACY_RESUME_HINT_RELATIVE = "vksplat_data/legacy_resume_step.txt";
 
     private GaussianSplatJob() {}
 
@@ -72,15 +74,22 @@ public final class GaussianSplatJob {
         return runInitial(context, datasetDirectory, requestedSteps, listener);
     }
 
-    /** True only for new models that persisted Gaussian + Adam + RNG + cumulative step state. */
+    /** Every verified PCS/VkSplat final model can be refined further. */
     public static boolean canContinueTraining(File datasetDirectory) {
-        return isVerifiedFinal(datasetDirectory) && checkpointFile(datasetDirectory).isFile()
-                && checkpointFile(datasetDirectory).length() > 0L;
+        return isVerifiedFinal(datasetDirectory);
+    }
+
+    /** True when Gaussian + Adam + RNG + cumulative optimizer state already exists. */
+    public static boolean hasExactTrainingCheckpoint(File datasetDirectory) {
+        File checkpoint = checkpointFile(datasetDirectory);
+        return isVerifiedFinal(datasetDirectory) && checkpoint.isFile() && checkpoint.length() > 0L;
     }
 
     /**
-     * Continues a completed model for exactly additionalSteps more optimizer iterations.
-     * This never treats a PLY-only legacy model as a true resume because its Adam state is gone.
+     * Continues a completed model for exactly additionalSteps more iterations.
+     * New models restore the full checkpoint. Models produced before checkpoints existed import the
+     * exact Gaussian parameters from splat.ply, initialize only the unavailable Adam moments once,
+     * and are converted to a full checkpoint at the end of that extension.
      */
     public static Result continueTraining(File datasetDirectory, int additionalSteps,
             ProgressListener listener) {
@@ -96,29 +105,42 @@ public final class GaussianSplatJob {
         if (!isVerifiedFinal(datasetDirectory)) {
             return Result.fail("追加学習できる完成済み3DGSモデルがありません。", 0);
         }
-        File checkpoint = checkpointFile(datasetDirectory);
-        if (!checkpoint.isFile() || checkpoint.length() == 0L) {
-            return Result.fail(
-                    "このモデルは旧版で作成され、optimizerの学習状態が保存されていません。"
-                            + "正確な追加学習には新版で一度モデルを作成し直してください。",
-                    readFrameCount(datasetDirectory));
-        }
 
         JSONObject before = readResult(datasetDirectory);
         int previousSteps = before == null ? 0 : before.optInt("training_steps", 0);
         int frameCount = readFrameCount(datasetDirectory);
+        if (previousSteps <= 0) {
+            return Result.fail("このモデルの累計学習回数を確認できないため、追加学習を開始できません。",
+                    frameCount);
+        }
+
+        final boolean exactCheckpointBeforeRun = hasExactTrainingCheckpoint(datasetDirectory);
+        if (!exactCheckpointBeforeRun) {
+            try {
+                writeLegacyResumeHint(datasetDirectory, previousSteps);
+                DiagnosticLog.i(TAG, "Legacy 3DGS continuation armed previousSteps=" + previousSteps
+                        + " mode=PLY_GAUSSIANS_ADAM_RESET_ONCE");
+            } catch (IOException error) {
+                DiagnosticLog.e(TAG, "Failed to arm legacy 3DGS continuation", error);
+                return Result.fail("旧モデルの追加学習状態を準備できませんでした。", frameCount);
+            }
+        }
+
         notifyProgress(listener, 1,
                 "保存済み3DGSの " + previousSteps + " step から追加学習を準備しています…");
 
         Context appContext = context.getApplicationContext();
         if (!ModelProcessingCoordinator.enter(appContext)) {
+            if (!exactCheckpointBeforeRun) deleteLegacyResumeHint(datasetDirectory);
             return Result.fail("変換用画面を開始できなかったため、安全のため追加学習を開始しませんでした。",
                     frameCount);
         }
 
         NativeGaussianTrainer.Result trained;
         try {
-            notifyProgress(listener, 4, "保存したoptimizer状態から3DGS追加学習を始めます…");
+            notifyProgress(listener, 4, exactCheckpointBeforeRun
+                    ? "保存したoptimizer状態から3DGS追加学習を始めます…"
+                    : "旧モデルのGaussianを引き継いで追加学習を始めます…");
             trained = NativeGaussianTrainer.train(
                     appContext,
                     datasetDirectory,
@@ -129,10 +151,12 @@ public final class GaussianSplatJob {
         }
 
         if (!trained.success) {
-            DiagnosticLog.w(TAG, "3DGS continuation failed: " + trained.message);
+            DiagnosticLog.w(TAG, "3DGS continuation failed: " + trained.message
+                    + " exactCheckpointBefore=" + exactCheckpointBeforeRun);
             return Result.fail(trained.message, frameCount);
         }
 
+        File checkpoint = checkpointFile(datasetDirectory);
         JSONObject after = readResult(datasetDirectory);
         int completedSteps = after == null ? 0 : after.optInt("training_steps", 0);
         boolean verified = isVerifiedFinal(datasetDirectory)
@@ -146,12 +170,15 @@ public final class GaussianSplatJob {
         if (!verified) {
             DiagnosticLog.e(TAG, "Continuation returned without cumulative checkpoint verification"
                     + " previous=" + previousSteps + " requested=" + additionalSteps
-                    + " completed=" + completedSteps);
+                    + " completed=" + completedSteps
+                    + " exactCheckpointBefore=" + exactCheckpointBeforeRun);
             return Result.fail("追加学習後のcheckpointを確認できませんでした。", frameCount);
         }
 
+        deleteLegacyResumeHint(datasetDirectory);
         DiagnosticLog.i(TAG, "3DGS CONTINUED previousSteps=" + previousSteps
                 + " addedSteps=" + additionalSteps + " totalSteps=" + completedSteps
+                + " resumeMode=" + (exactCheckpointBeforeRun ? "FULL_CHECKPOINT" : "LEGACY_PLY_MIGRATED")
                 + " gaussians=" + trained.gaussianCount
                 + " validationPsnr=" + trained.validationPsnr
                 + " device=" + trained.device);
@@ -185,7 +212,7 @@ public final class GaussianSplatJob {
                             + " pose+intrinsics=" + stats.validCameraFrames + "/" + count);
 
             // A completed model is opened as-is. Explicit additional training goes through
-            // continueTraining so an existing optimizer checkpoint is never accidentally reset.
+            // continueTraining so its saved state is never accidentally reset.
             File existing = new File(datasetDirectory, FINAL_SPLAT);
             JSONObject previous = readResult(datasetDirectory);
             if (existing.isFile() && isCompleteResult(previous)) {
@@ -199,6 +226,7 @@ public final class GaussianSplatJob {
             if (existing.isFile() && !existing.delete()) {
                 return Result.fail("以前の未完成データを更新できませんでした。", count);
             }
+            deleteLegacyResumeHint(datasetDirectory);
 
             notifyProgress(listener, 3, "変換中のカメラとAR表示を停止しています…");
             Context appContext = context.getApplicationContext();
@@ -270,6 +298,31 @@ public final class GaussianSplatJob {
 
     private static File checkpointFile(File datasetDirectory) {
         return new File(datasetDirectory, CHECKPOINT_RELATIVE);
+    }
+
+    private static File legacyResumeHintFile(File datasetDirectory) {
+        return new File(datasetDirectory, LEGACY_RESUME_HINT_RELATIVE);
+    }
+
+    private static void writeLegacyResumeHint(File datasetDirectory, int previousSteps)
+            throws IOException {
+        File hint = legacyResumeHintFile(datasetDirectory);
+        File parent = hint.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new IOException("cannot create VkSplat resume directory");
+        }
+        try (FileOutputStream out = new FileOutputStream(hint, false)) {
+            out.write((Integer.toString(previousSteps) + "\n").getBytes(StandardCharsets.US_ASCII));
+            out.getFD().sync();
+        }
+    }
+
+    private static void deleteLegacyResumeHint(File datasetDirectory) {
+        if (datasetDirectory == null) return;
+        File hint = legacyResumeHintFile(datasetDirectory);
+        if (hint.isFile() && !hint.delete()) {
+            DiagnosticLog.w(TAG, "Could not remove legacy resume hint " + hint.getAbsolutePath());
+        }
     }
 
     private static int readFrameCount(File datasetDirectory) {
