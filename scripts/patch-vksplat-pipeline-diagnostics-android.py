@@ -60,3 +60,4 @@ runpy.run_path("scripts/patch-vksplat-checkpoint-android.py", run_name="__main__
 # parameters in splat.ply. Import those exact parameters once, initialize only the unavailable Adam
 # moments, then publish a v2 checkpoint so every later run is an exact optimizer-state continuation.
 runpy.run_path("scripts/patch-vksplat-legacy-resume-android.py", run_name="__main__")
+runpy.run_path("scripts/patch-vksplat-legacy-resume-hint-android.py", run_name="__main__")
