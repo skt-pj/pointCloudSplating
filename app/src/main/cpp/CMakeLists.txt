@@ -18,6 +18,7 @@ endif()
 
 add_library(pointcloud3dgs SHARED
     native_3dgs.cpp
+    cumsum_selftest.cpp
     ${VKSPLAT_SRC}/buffer.cpp
     ${VKSPLAT_SRC}/colmap_reader.cpp
     ${VKSPLAT_SRC}/knn.cpp
