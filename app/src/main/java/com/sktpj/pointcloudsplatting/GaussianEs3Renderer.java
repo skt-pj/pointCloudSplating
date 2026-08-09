@@ -20,6 +20,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private static final String TAG = "GaussianViewer";
     private static final float MIN_DISPLAY_SCALE = 0.05f;
     private static final float MAX_DISPLAY_SCALE = 3.0f;
+    private static final float CAMERA_FOV_DEGREES = 55f;
     // position(3) + evaluated SH3 RGBA(4) + anisotropic scale(3) + quaternion(4)
     private static final int INSTANCE_FLOATS = 14;
     private static final int INSTANCE_STRIDE_BYTES = INSTANCE_FLOATS * Float.BYTES;
@@ -149,6 +150,9 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
     private float pitchDegrees = -10f;
     private float distance = 2.8f;
     private float baseDistance = 2.8f;
+    private float targetX;
+    private float targetY;
+    private float targetZ;
     private float displayScale = MIN_DISPLAY_SCALE;
     private boolean firstDrawReported;
     private boolean drawErrorReported;
@@ -240,20 +244,28 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         float yaw;
         float pitch;
         float cameraDistance;
+        float cameraTargetX;
+        float cameraTargetY;
+        float cameraTargetZ;
         float sizeScale;
         synchronized (this) {
             yaw = yawDegrees;
             pitch = pitchDegrees;
             cameraDistance = distance;
+            cameraTargetX = targetX;
+            cameraTargetY = targetY;
+            cameraTargetZ = targetZ;
             sizeScale = displayScale;
         }
 
         float yawRad = (float) Math.toRadians(yaw);
         float pitchRad = (float) Math.toRadians(pitch);
         float cosPitch = (float) Math.cos(pitchRad);
-        float eyeX = cameraDistance * cosPitch * (float) Math.sin(yawRad);
-        float eyeY = cameraDistance * (float) Math.sin(pitchRad);
-        float eyeZ = cameraDistance * cosPitch * (float) Math.cos(yawRad);
+        float eyeX = cameraTargetX
+                + cameraDistance * cosPitch * (float) Math.sin(yawRad);
+        float eyeY = cameraTargetY + cameraDistance * (float) Math.sin(pitchRad);
+        float eyeZ = cameraTargetZ
+                + cameraDistance * cosPitch * (float) Math.cos(yawRad);
 
         if (sortedUploadDirty) {
             uploadSortedInstances(current, eyeX, eyeY, eyeZ);
@@ -262,9 +274,14 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
 
         float[] view = new float[16];
         float[] projection = new float[16];
-        Matrix.setLookAtM(view, 0, eyeX, eyeY, eyeZ, 0f, 0f, 0f, 0f, 1f, 0f);
+        Matrix.setLookAtM(
+                view, 0,
+                eyeX, eyeY, eyeZ,
+                cameraTargetX, cameraTargetY, cameraTargetZ,
+                0f, 1f, 0f);
         Matrix.perspectiveM(
-                projection, 0, 55f, (float) width / (float) height, 0.05f, 30f);
+                projection, 0, CAMERA_FOV_DEGREES,
+                (float) width / (float) height, 0.05f, 30f);
 
         GLES30.glUseProgram(program);
         GLES30.glUniformMatrix4fv(viewLocation, 1, false, view, 0);
@@ -315,7 +332,7 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                                     + "appearance=SH0_SH3_CPU_VIEW_EVAL alpha=BACK_TO_FRONT",
                             current.gaussianCount, sizeScale));
             statusListener.onStatus(
-                    "3Dモデルを表示中\nドラッグで回転 / ピンチで拡大・縮小");
+                    "3Dモデルを表示中\n1本指で回転 / 2本指で移動 / ピンチで拡大・縮小");
         }
     }
 
@@ -473,6 +490,9 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
             distance = baseDistance;
             yawDegrees = 0f;
             pitchDegrees = -10f;
+            targetX = 0f;
+            targetY = 0f;
+            targetZ = 0f;
             firstDrawReported = false;
             drawErrorReported = false;
             sortedUploadDirty = true;
@@ -485,9 +505,41 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
                 * (float) Math.pow(MAX_DISPLAY_SCALE / MIN_DISPLAY_SCALE, t);
     }
 
-    synchronized void rotate(float dxDegrees, float dyDegrees) {
-        yawDegrees = (yawDegrees - dxDegrees) % 360f;
-        pitchDegrees = Math.max(-85f, Math.min(85f, pitchDegrees - dyDegrees));
+    synchronized void rotate(float dxPixels, float dyPixels) {
+        float degreesPerPixel = 360f / Math.max(1f, height);
+        yawDegrees = (yawDegrees - dxPixels * degreesPerPixel) % 360f;
+        pitchDegrees = Math.max(
+                -85f,
+                Math.min(85f, pitchDegrees - dyPixels * degreesPerPixel));
+        sortedUploadDirty = true;
+    }
+
+    synchronized void pan(float dxPixels, float dyPixels) {
+        if (model == null || !Float.isFinite(dxPixels) || !Float.isFinite(dyPixels)) return;
+
+        float yawRad = (float) Math.toRadians(yawDegrees);
+        float pitchRad = (float) Math.toRadians(pitchDegrees);
+        float sinYaw = (float) Math.sin(yawRad);
+        float cosYaw = (float) Math.cos(yawRad);
+        float sinPitch = (float) Math.sin(pitchRad);
+        float cosPitch = (float) Math.cos(pitchRad);
+
+        float rightX = cosYaw;
+        float rightY = 0f;
+        float rightZ = -sinYaw;
+        float upX = -sinYaw * sinPitch;
+        float upY = cosPitch;
+        float upZ = -cosYaw * sinPitch;
+
+        float worldPerPixel = 2f * distance
+                * (float) Math.tan(Math.toRadians(CAMERA_FOV_DEGREES * 0.5f))
+                / Math.max(1f, height);
+        float horizontal = -dxPixels * worldPerPixel;
+        float vertical = dyPixels * worldPerPixel;
+
+        targetX += rightX * horizontal + upX * vertical;
+        targetY += rightY * horizontal + upY * vertical;
+        targetZ += rightZ * horizontal + upZ * vertical;
         sortedUploadDirty = true;
     }
 
@@ -503,6 +555,9 @@ final class GaussianEs3Renderer implements GLSurfaceView.Renderer {
         yawDegrees = 0f;
         pitchDegrees = -10f;
         distance = baseDistance;
+        targetX = 0f;
+        targetY = 0f;
+        targetZ = 0f;
         sortedUploadDirty = true;
     }
 
