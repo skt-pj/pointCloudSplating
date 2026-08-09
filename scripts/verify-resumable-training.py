@@ -71,6 +71,8 @@ def main() -> None:
 
     # Viewer-compatible migration: only invalid world positions make a Gaussian unusable. Appearance,
     # scale, opacity and quaternion channels are recoverable and must be made finite deterministically.
+    # The patch source intentionally contains the old all-or-nothing loop as its replacement anchor,
+    # so absence of that old error is asserted only against the fully prepared trainer below.
     for needle, why in [
         ("dropped_nonfinite_position", "invalid-position Gaussians are not compacted"),
         ("continue;", "invalid-position record is not skipped"),
@@ -86,8 +88,6 @@ def main() -> None:
         ("sanitizedSH=", "migration diagnostics do not report repaired channels"),
     ]:
         require(validity, needle, why)
-    if "legacy 3DGS PLY contains non-finite values" in validity:
-        raise SystemExit("resumable training check failed: all-or-nothing non-finite rejection returned")
 
     for needle, why in [
         ('"legacy_resume_step.txt"', "legacy resume hint filename missing"),
