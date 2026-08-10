@@ -101,7 +101,7 @@ public final class DriveDiagnosticLogStore {
             preferences(value).edit().putString(PREF_DOCUMENT_URI, uri.toString()).commit();
             appContext = value;
             return true;
-        } catch (SecurityException | RuntimeException error) {
+        } catch (RuntimeException error) {
             Log.e(TAG, "Could not persist diagnostics document URI", error);
             return false;
         }
