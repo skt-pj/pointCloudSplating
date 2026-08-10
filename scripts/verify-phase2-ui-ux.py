@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build-time checks for the v1.0.7 Phase 2 classification and user-facing UI correction."""
+"""Build-time checks for Phase 2 classification and user-facing UI correction."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +30,6 @@ def main() -> None:
     library = LIBRARY.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
 
-    # Structurally valid Depth observations can legitimately contribute zero points after the
-    # Phase 2 confidence filter. They are a quality exclusion, not a corrupt-PLY hard failure.
     require(evaluator, "int depthExcludedQualityCount;", "quality exclusion counter missing")
     require(evaluator, '"depth_observation_no_usable_points"', "quality exclusion reason missing")
     require(evaluator, 'warn("depth_observation_no_usable_points"',
@@ -41,8 +39,6 @@ def main() -> None:
     require(evaluator, "MIN_CONFIDENCE = 0.30f",
             "confidence threshold must not be weakened just to obtain PASS")
 
-    # Phase 3 remains blocked until Phase 2 is actually accepted, but the UI must say that plainly
-    # instead of presenting an enabled action that inevitably fails.
     require(processing, "PHASE3_PROCESSING_ENABLED = false", "Phase 3 was enabled prematurely")
     require(processing, "static boolean isPhase3ProcessingEnabled()",
             "UI cannot query Phase 3 availability")
@@ -60,8 +56,8 @@ def main() -> None:
     require(library, "撮影データ保存済み",
             "library must represent saved data without promising model creation")
 
-    require(version, "VERSION_NAME=1.0.7", "versionName mismatch")
-    require(version, "VERSION_CODE=44", "versionCode mismatch")
+    require(version, "VERSION_NAME=1.0.8", "versionName mismatch")
+    require(version, "VERSION_CODE=45", "versionCode mismatch")
 
     print("Phase 2/UI correction checks passed")
 
