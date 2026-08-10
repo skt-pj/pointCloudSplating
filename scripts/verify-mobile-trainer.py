@@ -116,11 +116,12 @@ def main() -> None:
     require(capture, '"depth_obs_%06d_%d"', "independent Raw Depth observation files missing")
     require(capture, '"rgb_pairing_required", false', "Raw Depth must remain independent of RGB")
     forbid(capture, "frame.acquireCameraImage()", "ARCore CPU image must not become photometric ground truth")
+    forbid(capture, "frame.getImageMetadata()", "SharedCamera capture must use Camera2 metadata callbacks")
     require(camera, "minCpuPixels", "ARCore stream headroom policy missing")
     require(camera, "High-resolution Camera2 JPEG is the RGB observation of record", "camera selection rationale missing")
     require(finalizer, '"jpeg_intrinsics"', "saved JPEG camera model is not used")
     require(finalizer, '"depth_observation_count"', "independent Depth observation manifest missing")
-    require(finalizer, '"Camera2 high-resolution RGB observations"', "finalizer RGB source marker missing")
+    require(finalizer, "Camera2 high-resolution RGB observations", "finalizer RGB source marker missing")
     # Phase 2/3 have not started yet. Existing mobile training envelope stays unchanged for safety.
     require(exporter, "MAX_TRAIN_LONG_EDGE = 1000", "mobile training image envelope changed before Phase 3")
     forbid(exporter, "TRAIN_DOWNSAMPLE", "legacy blind training downsample returned")
