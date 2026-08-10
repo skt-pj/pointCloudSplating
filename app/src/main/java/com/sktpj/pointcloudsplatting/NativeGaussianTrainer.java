@@ -21,6 +21,8 @@ public final class NativeGaussianTrainer {
     private static final String LEGACY_SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6";
     private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v7";
     private static final String CHECKPOINT_FILE = "3dgs_checkpoint.bin";
+    private static final String PHASE3_STATE_FILE = "phase3_training_state.json";
+    private static final String PHASE3_PROFILE = "progressive_low_mid_high_patch";
 
     // These are defaults for the first mobile run, not a quality ceiling. Additional runs may use
     // any positive step count selected by the user and continue from the persisted optimizer state.
@@ -55,11 +57,14 @@ public final class NativeGaussianTrainer {
         public final int addedSteps;
         public final boolean resumed;
         public final double validationPsnr;
+        public final double validationSsim;
+        public final int validationViewCount;
         public final double peakVramMb;
         public final String device;
 
         private Result(boolean success, String message, File outputFile, int gaussianCount,
                 int steps, int addedSteps, boolean resumed, double validationPsnr,
+                double validationSsim, int validationViewCount,
                 double peakVramMb, String device) {
             this.success = success;
             this.message = message;
@@ -69,13 +74,15 @@ public final class NativeGaussianTrainer {
             this.addedSteps = addedSteps;
             this.resumed = resumed;
             this.validationPsnr = validationPsnr;
+            this.validationSsim = validationSsim;
+            this.validationViewCount = validationViewCount;
             this.peakVramMb = peakVramMb;
             this.device = device;
         }
 
         static Result fail(String message) {
             return new Result(false, message, null, 0, 0, 0, false,
-                    Double.NaN, Double.NaN, "");
+                    Double.NaN, Double.NaN, 0, Double.NaN, "");
         }
     }
 
@@ -83,6 +90,67 @@ public final class NativeGaussianTrainer {
     public static Result train(Context context, File dataset, ProgressListener listener) {
         int frames = readFrameCountForDefault(dataset);
         return train(context, dataset, defaultTrainingSteps(frames), listener);
+    }
+
+    /** Initial Phase 3 run: low full-frame -> medium full-frame -> high-resolution patch. */
+    public static Result trainProgressiveInitial(Context context, File dataset,
+            ProgressListener listener) {
+        int frames = readFrameCountForDefault(dataset);
+        return trainProgressiveInitial(context, dataset, defaultTrainingSteps(frames), listener);
+    }
+
+    public static Result trainProgressiveInitial(Context context, File dataset, int requestedSteps,
+            ProgressListener listener) {
+        if (requestedSteps < 3) return Result.fail("初回3D学習は3 step以上を指定してください");
+        if (context == null || dataset == null || !dataset.isDirectory()) {
+            return Result.fail("撮影データが見つかりませんでした");
+        }
+        int low = Math.max(1, requestedSteps * 30 / 100);
+        int mid = Math.max(1, requestedSteps * 40 / 100);
+        int high = requestedSteps - low - mid;
+        if (high < 1) { high = 1; if (mid > low) mid--; else low--; }
+        int[] stageSteps = {low, mid, high};
+        JSONObject state = readPhase3State(dataset);
+        boolean compatible = state != null
+                && PHASE3_PROFILE.equals(state.optString("profile", ""))
+                && state.optInt("requested_steps", -1) == requestedSteps;
+        if (!compatible) {
+            resetInitialPhase3State(dataset);
+            state = new JSONObject();
+            try {
+                state.put("profile", PHASE3_PROFILE);
+                state.put("requested_steps", requestedSteps);
+                state.put("completed_stage", 0);
+            } catch (Exception ignored) {}
+            writePhase3State(dataset, state);
+        }
+        int completedStage = Math.max(0, Math.min(3, state.optInt("completed_stage", 0)));
+        Result last = null;
+        for (int stage = completedStage + 1; stage <= 3; stage++) {
+            try {
+                state.put("current_stage", stage);
+                state.put("stage_steps", stageSteps[stage - 1]);
+                writePhase3State(dataset, state);
+            } catch (Exception error) {
+                return Result.fail("3D学習状態を保存できませんでした");
+            }
+            final int currentStage = stage;
+            final int progressStart = stage == 1 ? 0 : (stage == 2 ? 30 : 70);
+            final int progressSpan = stage == 1 ? 30 : (stage == 2 ? 40 : 30);
+            last = train(context, dataset, stageSteps[stage - 1], (percent, message) -> {
+                int mapped = progressStart + Math.round(progressSpan * percent / 100f);
+                notifyProgress(listener, mapped,
+                        "Phase 3 " + currentStage + "/3: " + message);
+            });
+            if (!last.success) return last;
+            try {
+                state.put("completed_stage", stage);
+                writePhase3State(dataset, state);
+            } catch (Exception error) {
+                return Result.fail("3D学習状態を更新できませんでした");
+            }
+        }
+        return last == null ? Result.fail("3D学習を開始できませんでした") : last;
     }
 
     /** Runs exactly requestedSteps more optimizer iterations, resuming a checkpoint when present. */
@@ -158,6 +226,8 @@ public final class NativeGaussianTrainer {
             int addedSteps = json.optInt("added_steps", requestedSteps);
             boolean resumed = json.optBoolean("resumed", checkpointBeforeRun);
             double psnr = json.optDouble("validation_psnr", Double.NaN);
+            double ssim = json.optDouble("validation_ssim", Double.NaN);
+            int validationViews = json.optInt("validation_view_count", 0);
             double peakVramMb = json.optDouble("peak_vram_mb", Double.NaN);
             String device = json.optString("device", "Vulkan");
             int gaussianBudget = json.optInt("gaussian_budget", 120_000);
@@ -165,19 +235,63 @@ public final class NativeGaussianTrainer {
             String initialization = json.optString("initialization", "surface_knn_16_3");
 
             writeFinalResult(dataset, gaussians, completedSteps, addedSteps, resumed, psnr,
-                    peakVramMb, device, gaussianBudget, strategy, initialization, prepared);
+                    ssim, validationViews, peakVramMb, device, gaussianBudget, strategy,
+                    initialization, prepared);
             DiagnosticLog.i(TAG, "Mobile 3DGS COMPLETE gaussians=" + gaussians
                     + "/" + gaussianBudget + " steps=" + completedSteps
                     + " addedSteps=" + addedSteps + " resumed=" + resumed
-                    + " validationPsnr=" + psnr + " peakVramMb=" + peakVramMb
+                    + " validationPsnr=" + psnr + " validationSsim=" + ssim
+                    + " holdoutViews=" + validationViews + " peakVramMb=" + peakVramMb
                     + " strategy=" + strategy + " init=" + initialization
                     + " device=" + device + " output=" + output.getAbsolutePath());
             notifyProgress(listener, 100, resumed ? "追加学習が完了しました" : "3Dモデルを作成しました");
             return new Result(true, resumed ? "3DGS追加学習完了" : "3DGS学習完了", output,
-                    gaussians, completedSteps, addedSteps, resumed, psnr, peakVramMb, device);
+                    gaussians, completedSteps, addedSteps, resumed, psnr, ssim,
+                    validationViews, peakVramMb, device);
         } catch (Throwable error) {
             DiagnosticLog.e(TAG, "Mobile 3DGS training failed", error);
             return Result.fail("端末内3DGS学習に失敗しました: " + error.getClass().getSimpleName());
+        }
+    }
+
+    private static JSONObject readPhase3State(File dataset) {
+        if (dataset == null) return null;
+        File file = new File(dataset, PHASE3_STATE_FILE);
+        if (!file.isFile()) return null;
+        try (InputStream input = new FileInputStream(file)) {
+            byte[] bytes = new byte[(int) Math.min(file.length(), 256 * 1024)];
+            int offset = 0; int n;
+            while (offset < bytes.length && (n = input.read(bytes, offset, bytes.length - offset)) > 0) offset += n;
+            return new JSONObject(new String(bytes, 0, offset, StandardCharsets.UTF_8));
+        } catch (Exception ignored) { return null; }
+    }
+
+    private static int readPhase3Stage(File dataset) {
+        JSONObject state = readPhase3State(dataset);
+        return state == null ? 0 : state.optInt("current_stage", 0);
+    }
+
+    private static void writePhase3State(File dataset, JSONObject state) {
+        if (dataset == null || state == null) return;
+        try (FileOutputStream out = new FileOutputStream(new File(dataset, PHASE3_STATE_FILE), false)) {
+            out.write(state.toString(2).getBytes(StandardCharsets.UTF_8));
+            out.getFD().sync();
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static void resetInitialPhase3State(File dataset) {
+        if (dataset == null) return;
+        File[] stale = {
+                new File(dataset, "splat.ply"),
+                new File(dataset, "3dgs_result.json"),
+                new File(dataset, "3dgs_job.json"),
+                new File(dataset, "phase3_stage_result.json"),
+                new File(new File(dataset, "vksplat_data"), CHECKPOINT_FILE)
+        };
+        for (File file : stale) if (file.isFile() && !file.delete()) {
+            DiagnosticLog.w(TAG, "Could not remove stale Phase 3 artifact " + file.getAbsolutePath());
         }
     }
 
@@ -236,12 +350,22 @@ public final class NativeGaussianTrainer {
     }
 
     private static void writeFinalResult(File dataset, int gaussians, int steps, int addedSteps,
-            boolean resumed, double psnr, double peakVramMb, String device, int gaussianBudget,
-            String strategy, String initialization, ColmapDatasetExporter.Result prepared)
+            boolean resumed, double psnr, double ssim, int validationViews, double peakVramMb,
+            String device, int gaussianBudget, String strategy, String initialization,
+            ColmapDatasetExporter.Result prepared)
             throws Exception {
+        int phase3Stage = readPhase3Stage(dataset);
+        boolean progressive = phase3Stage > 0;
+        boolean finalStage = !progressive || phase3Stage >= 3;
         JSONObject result = new JSONObject();
-        result.put("format_version", 8);
-        result.put("status", "COMPLETE");
+        result.put("format_version", 9);
+        result.put("status", finalStage ? "COMPLETE" : "STAGE_COMPLETE");
+        result.put("phase3_pipeline_version", progressive ? 1 : 0);
+        if (progressive) {
+            result.put("training_profile", PHASE3_PROFILE);
+            result.put("phase3_stage", phase3Stage);
+        }
+        result.put("geometry_source", "phase2_geometry_prior.ply");
         result.put("backend", "pcs_mobile_vulkan_trainer_v1");
         result.put("raster_backend", "VkSplat@41cff93b79145dec314488d4313bc3a6d737038b");
         result.put("output", "splat.ply");
@@ -252,7 +376,9 @@ public final class NativeGaussianTrainer {
         result.put("training_steps", steps);
         result.put("last_run_added_steps", addedSteps);
         result.put("last_run_resumed", resumed);
-        result.put("training_resolution_scale", 0.25);
+        result.put("training_image_policy", progressive
+                ? "720px full -> 1000px full -> native-resolution principal-point patch up to 1280x960"
+                : "1000px full-frame continuation");
         result.put("loss", "L1 + SSIM");
         result.put("optimized_parameters", "position, quaternion, scale, opacity, SH0-SH3");
         result.put("initialization", initialization);
@@ -266,22 +392,30 @@ public final class NativeGaussianTrainer {
         result.put("rasterized_image_loss", true);
         result.put("l1_ssim_backward", true);
         result.put("photometric_optimization", true);
-        result.put("final_3dgs", true);
+        result.put("final_3dgs", finalStage);
         result.put("resumable_training", true);
         result.put("checkpoint_available", true);
         result.put("checkpoint_file", "vksplat_data/" + CHECKPOINT_FILE);
         result.put("checkpoint_state", "gaussians+adam+rng+step");
         result.put("vulkan_device", device);
+        result.put("holdout_view_count", validationViews);
         if (Double.isFinite(psnr)) result.put("validation_psnr", psnr);
+        if (Double.isFinite(ssim)) result.put("validation_ssim", ssim);
         if (Double.isFinite(peakVramMb)) result.put("peak_vram_mb", peakVramMb);
         result.put("completed_at_unix_ms", System.currentTimeMillis());
-        try (FileOutputStream out = new FileOutputStream(new File(dataset, "3dgs_result.json"))) {
+        File resultFile = new File(dataset, finalStage ? "3dgs_result.json" : "phase3_stage_result.json");
+        try (FileOutputStream out = new FileOutputStream(resultFile, false)) {
             out.write(result.toString(2).getBytes(StandardCharsets.UTF_8));
+            out.getFD().sync();
         }
+        if (!finalStage) return;
 
         File jobFile = new File(dataset, "3dgs_job.json");
         JSONObject job = new JSONObject();
-        job.put("format_version", 9);
+        job.put("format_version", 10);
+        job.put("phase3_pipeline_version", progressive ? 1 : 0);
+        if (progressive) job.put("training_profile", PHASE3_PROFILE);
+        job.put("geometry_source", "phase2_geometry_prior.ply");
         job.put("status", "COMPLETE");
         job.put("backend", "pcs_mobile_vulkan_trainer_v1");
         job.put("raster_backend", "VkSplat@41cff93b79145dec314488d4313bc3a6d737038b");

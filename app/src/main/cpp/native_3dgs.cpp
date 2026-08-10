@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -132,7 +133,8 @@ TrainerConfig makeConfig(const std::string& dataRoot,
     c.image_dir = imageDir;
     c.mask_dir = "";
     c.sparse_dir = sparseDir;
-    c.eval_interval = std::max(2, frameCount + 1);
+    // Keep roughly 20% of sufficiently large datasets out of optimization for real hold-out evaluation.
+    c.eval_interval = frameCount >= 8 ? 5 : std::max(2, frameCount + 1);
     c.image_cache_device = TrainerConfig::CacheImage::CPU;
     c.global_scale = 1.0f;
     c.init_scale = 1.0f;
@@ -551,36 +553,115 @@ bool trainOneStep(VulkanGSTrainer& trainer,
     return true;
 }
 
-double validationPsnr(VulkanGSTrainer& trainer,
-                      VulkanGSRendererUniforms& uniforms,
-                      VulkanGSPipelineBuffers& buffers) {
-    if (trainer.num_val() == 0) return NAN;
-    trainer.get_val_camera(0, uniforms);
-    uniforms.active_sh = 3;
-    uniforms.step = trainer.getCompletedTrainingSteps();
-    {
-        auto guard = DeviceGuard(&trainer);
-        forward(trainer, uniforms, buffers, true);
-    }
-    trainer.copyFromDevice(buffers.pixel_state);
-    auto& reference = trainer.get_val_image(0).buffer;
-    size_t pixelCount = static_cast<size_t>(uniforms.image_width) * uniforms.image_height;
-    if (buffers.pixel_state.size() < pixelCount * 4 || reference.size() < pixelCount * 4) return NAN;
-    double mse = 0.0;
-    size_t samples = 0;
-    for (size_t i = 0; i < pixelCount; ++i) {
+struct ValidationMetrics {
+    double psnr = NAN;
+    double ssim = NAN;
+    int views = 0;
+};
+
+void writeValidationPpm(const std::string& path, uint32_t width, uint32_t height,
+                        const Buffer<float>& pixels) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("could not write hold-out render");
+    out << "P6\n" << width << " " << height << "\n255\n";
+    for (size_t i = 0, n = static_cast<size_t>(width) * height; i < n; ++i) {
+        unsigned char rgb[3];
         for (int c = 0; c < 3; ++c) {
-            double predicted = std::clamp(static_cast<double>(buffers.pixel_state[4*i+c]), 0.0, 1.0);
-            double expected = static_cast<double>(reference[4*i+c]) / 255.0;
-            double d = predicted - expected;
-            mse += d * d;
-            ++samples;
+            double value = std::clamp(static_cast<double>(pixels[4*i+c]), 0.0, 1.0);
+            rgb[c] = static_cast<unsigned char>(std::lround(value * 255.0));
+        }
+        out.write(reinterpret_cast<const char*>(rgb), 3);
+    }
+}
+
+double blockSsim(const Buffer<float>& predicted, const Buffer<uint8_t>& reference,
+                 uint32_t width, uint32_t height) {
+    constexpr int block = 8;
+    constexpr double c1 = 0.01 * 0.01;
+    constexpr double c2 = 0.03 * 0.03;
+    double total = 0.0;
+    size_t blocks = 0;
+    for (uint32_t by = 0; by < height; by += block) {
+        for (uint32_t bx = 0; bx < width; bx += block) {
+            double meanP = 0.0, meanR = 0.0;
+            size_t count = 0;
+            for (uint32_t y = by; y < std::min<uint32_t>(height, by + block); ++y) {
+                for (uint32_t x = bx; x < std::min<uint32_t>(width, bx + block); ++x) {
+                    size_t i = static_cast<size_t>(y) * width + x;
+                    double py = 0.299 * std::clamp<double>(predicted[4*i], 0.0, 1.0)
+                              + 0.587 * std::clamp<double>(predicted[4*i+1], 0.0, 1.0)
+                              + 0.114 * std::clamp<double>(predicted[4*i+2], 0.0, 1.0);
+                    double ry = (0.299 * reference[4*i] + 0.587 * reference[4*i+1]
+                               + 0.114 * reference[4*i+2]) / 255.0;
+                    meanP += py; meanR += ry; count++;
+                }
+            }
+            if (count < 2) continue;
+            meanP /= count; meanR /= count;
+            double varP = 0.0, varR = 0.0, cov = 0.0;
+            for (uint32_t y = by; y < std::min<uint32_t>(height, by + block); ++y) {
+                for (uint32_t x = bx; x < std::min<uint32_t>(width, bx + block); ++x) {
+                    size_t i = static_cast<size_t>(y) * width + x;
+                    double py = 0.299 * std::clamp<double>(predicted[4*i], 0.0, 1.0)
+                              + 0.587 * std::clamp<double>(predicted[4*i+1], 0.0, 1.0)
+                              + 0.114 * std::clamp<double>(predicted[4*i+2], 0.0, 1.0);
+                    double ry = (0.299 * reference[4*i] + 0.587 * reference[4*i+1]
+                               + 0.114 * reference[4*i+2]) / 255.0;
+                    double dp = py - meanP, dr = ry - meanR;
+                    varP += dp * dp; varR += dr * dr; cov += dp * dr;
+                }
+            }
+            double denom = static_cast<double>(count - 1);
+            varP /= denom; varR /= denom; cov /= denom;
+            double value = ((2.0 * meanP * meanR + c1) * (2.0 * cov + c2))
+                         / ((meanP * meanP + meanR * meanR + c1) * (varP + varR + c2));
+            if (std::isfinite(value)) { total += value; blocks++; }
         }
     }
-    if (samples == 0) return NAN;
-    mse /= static_cast<double>(samples);
-    if (mse <= 1e-12) return 120.0;
-    return 10.0 * std::log10(1.0 / mse);
+    return blocks ? total / static_cast<double>(blocks) : NAN;
+}
+
+ValidationMetrics validationMetrics(VulkanGSTrainer& trainer,
+                                    VulkanGSRendererUniforms& uniforms,
+                                    VulkanGSPipelineBuffers& buffers,
+                                    const std::string& dataRoot) {
+    ValidationMetrics result;
+    double squaredError = 0.0;
+    size_t samples = 0;
+    double ssimTotal = 0.0;
+    int ssimViews = 0;
+    for (size_t view = 0; view < trainer.num_val(); ++view) {
+        trainer.get_val_camera(view, uniforms);
+        uniforms.active_sh = 3;
+        uniforms.step = trainer.getCompletedTrainingSteps();
+        {
+            auto guard = DeviceGuard(&trainer);
+            forward(trainer, uniforms, buffers, true);
+        }
+        trainer.copyFromDevice(buffers.pixel_state);
+        auto& reference = trainer.get_val_image(view).buffer;
+        size_t pixelCount = static_cast<size_t>(uniforms.image_width) * uniforms.image_height;
+        if (buffers.pixel_state.size() < pixelCount * 4 || reference.size() < pixelCount * 4) continue;
+        for (size_t i = 0; i < pixelCount; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                double predicted = std::clamp(static_cast<double>(buffers.pixel_state[4*i+c]), 0.0, 1.0);
+                double expected = static_cast<double>(reference[4*i+c]) / 255.0;
+                double d = predicted - expected;
+                squaredError += d * d; samples++;
+            }
+        }
+        double ssim = blockSsim(buffers.pixel_state, reference, uniforms.image_width, uniforms.image_height);
+        if (std::isfinite(ssim)) { ssimTotal += ssim; ssimViews++; }
+        writeValidationPpm(dataRoot + "/phase3_holdout_render_" + std::to_string(view) + ".ppm",
+                           uniforms.image_width, uniforms.image_height, buffers.pixel_state);
+        result.views++;
+    }
+    if (samples > 0) {
+        double mse = squaredError / static_cast<double>(samples);
+        result.psnr = mse <= 1e-12 ? 120.0 : 10.0 * std::log10(1.0 / mse);
+    }
+    if (ssimViews > 0) result.ssim = ssimTotal / ssimViews;
+    return result;
 }
 
 std::string deviceName(VulkanGSTrainer& trainer) {
@@ -592,8 +673,8 @@ std::string deviceName(VulkanGSTrainer& trainer) {
 }
 
 std::string successJson(size_t count, uint32_t cumulativeSteps, int addedSteps,
-                        int optimizedSteps, bool resumed, double psnr,
-                        const std::string& device, size_t peakBytes) {
+                        int optimizedSteps, bool resumed, double psnr, double ssim,
+                        int validationViews, const std::string& device, size_t peakBytes) {
     std::ostringstream out;
     out << "{\"success\":true,\"message\":\"mobile 3DGS training complete\",\"gaussian_count\":"
         << count << ",\"steps\":" << cumulativeSteps
@@ -605,6 +686,8 @@ std::string successJson(size_t count, uint32_t cumulativeSteps, int addedSteps,
         << ",\"strategy\":\"bounded_mcmc\",\"initialization\":\"surface_knn_16_3\""
         << ",\"device\":\"" << jsonEscape(device) << "\"";
     if (std::isfinite(psnr)) out << ",\"validation_psnr\":" << psnr;
+    if (std::isfinite(ssim)) out << ",\"validation_ssim\":" << ssim;
+    out << ",\"validation_view_count\":" << validationViews;
     out << "}";
     return out.str();
 }
@@ -713,7 +796,9 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
         }
 
         progress.send(96, "学習結果を確認しています…");
-        double psnr = validationPsnr(trainer, uniforms, buffers);
+        ValidationMetrics validation = validationMetrics(trainer, uniforms, buffers, dataRoot);
+        double psnr = validation.psnr;
+        double ssim = validation.ssim;
         progress.send(98, "3DGSモデルと追加学習checkpointを書き出しています…");
         const size_t finalCount = buffers.num_splats;
         const size_t peakBytes = trainer.getPeakAllocSize();
@@ -728,12 +813,14 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
              + " resumed=" + std::string(resumed ? "true" : "false")
              + " optimizedSteps=" + std::to_string(optimizedSteps)
              + " peakMB=" + std::to_string(peakBytes / (1024.0 * 1024.0))
-             + " psnr=" + (std::isfinite(psnr) ? std::to_string(psnr) : std::string("n/a")));
+             + " psnr=" + (std::isfinite(psnr) ? std::to_string(psnr) : std::string("n/a"))
+             + " ssim=" + (std::isfinite(ssim) ? std::to_string(ssim) : std::string("n/a"))
+             + " holdoutViews=" + std::to_string(validation.views));
         trainer.cleanupBuffers(buffers);
         trainer.cleanup();
         progress.send(100, resumed ? "3DGS追加学習が完了しました" : "3DGS学習が完了しました");
         std::string json = successJson(finalCount, cumulativeSteps, steps, optimizedSteps,
-                                       resumed, psnr, gpu, peakBytes);
+                                       resumed, psnr, ssim, validation.views, gpu, peakBytes);
         return env->NewStringUTF(json.c_str());
     } catch (const std::exception& error) {
         loge(std::string("3DGS training failed: ") + error.what());

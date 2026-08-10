@@ -176,6 +176,10 @@ public final class GaussianSplatJob {
         }
 
         deleteLegacyResumeHint(datasetDirectory);
+        Phase3DatasetEvaluator.Result phase3 = Phase3DatasetEvaluator.evaluate(datasetDirectory);
+        if (!phase3.machineGatePassed) {
+            return Result.fail("追加学習は完了しましたが、結果検証に失敗しました。", frameCount);
+        }
         DiagnosticLog.i(TAG, "3DGS CONTINUED previousSteps=" + previousSteps
                 + " addedSteps=" + additionalSteps + " totalSteps=" + completedSteps
                 + " resumeMode=" + (exactCheckpointBeforeRun ? "FULL_CHECKPOINT" : "LEGACY_PLY_MIGRATED")
@@ -197,9 +201,13 @@ public final class GaussianSplatJob {
             DiagnosticLog.w(TAG,
                     "Downstream 3D processing blocked: PHASE1_EVAL is not PASS dataset="
                             + datasetDirectory.getAbsolutePath());
-            return Result.fail(
-                    "撮影データの検証がPASSしていないため、3D処理を開始しません。診断ログを確認してください。",
-                    0);
+            return Result.fail("撮影データの検証が完了していません。", 0);
+        }
+        if (!Phase2DatasetEvaluator.hasStoredPass(datasetDirectory)) {
+            DiagnosticLog.w(TAG,
+                    "Phase 3 blocked: PHASE2_EVAL is not PASS dataset="
+                            + datasetDirectory.getAbsolutePath());
+            return Result.fail("3D形状の検証が完了していません。少し待ってからもう一度お試しください。", 0);
         }
         File transformsFile = new File(datasetDirectory, "transforms.json");
         if (!transformsFile.isFile()) {
@@ -246,9 +254,11 @@ public final class GaussianSplatJob {
             try {
                 notifyProgress(listener, 4, "端末内で3Dモデルの学習を始めます…");
                 trained = requestedSteps > 0
-                        ? NativeGaussianTrainer.train(appContext, datasetDirectory, requestedSteps,
+                        ? NativeGaussianTrainer.trainProgressiveInitial(
+                                appContext, datasetDirectory, requestedSteps,
                                 (percent, message) -> notifyProgress(listener, percent, message))
-                        : NativeGaussianTrainer.train(appContext, datasetDirectory,
+                        : NativeGaussianTrainer.trainProgressiveInitial(
+                                appContext, datasetDirectory,
                                 (percent, message) -> notifyProgress(listener, percent, message));
             } finally {
                 ModelProcessingCoordinator.exit();
@@ -272,6 +282,12 @@ public final class GaussianSplatJob {
                 return Result.fail("3Dモデルの学習結果を確認できませんでした。", count);
             }
 
+            Phase3DatasetEvaluator.Result phase3 = Phase3DatasetEvaluator.evaluate(datasetDirectory);
+            if (!phase3.machineGatePassed) {
+                DiagnosticLog.e(TAG, "Phase 3 machine evaluation failed after trainer completion");
+                return Result.fail("3Dモデルは学習しましたが、結果検証に失敗しました。", count);
+            }
+
             DiagnosticLog.i(TAG,
                     "Full 3DGS COMPLETE frames=" + count
                             + " gaussians=" + trained.gaussianCount
@@ -279,8 +295,8 @@ public final class GaussianSplatJob {
                             + " checkpoint=true"
                             + " validationPsnr=" + trained.validationPsnr
                             + " device=" + trained.device);
-            notifyProgress(listener, 100, "3Dモデルを作成しました");
-            return Result.complete("3DGS学習完了", count, trained.gaussianCount, trained.outputFile);
+            notifyProgress(listener, 100, "3Dモデルを作成しました。表示して仕上がりを確認します");
+            return Result.complete("3DGS学習完了・品質確認待ち", count, trained.gaussianCount, trained.outputFile);
         } catch (Exception e) {
             ModelProcessingCoordinator.exit();
             DiagnosticLog.e(TAG, "Full 3DGS job failed", e);
@@ -301,7 +317,10 @@ public final class GaussianSplatJob {
                 && result.optBoolean("rasterized_image_loss", false)
                 && result.optBoolean("l1_ssim_backward", false)
                 && result.optBoolean("density_control", false)
-                && result.optBoolean("final_3dgs", false);
+                && result.optBoolean("final_3dgs", false)
+                && result.optInt("phase3_pipeline_version", 0) >= 1
+                && "progressive_low_mid_high_patch".equals(
+                        result.optString("training_profile", ""));
     }
 
     private static File checkpointFile(File datasetDirectory) {

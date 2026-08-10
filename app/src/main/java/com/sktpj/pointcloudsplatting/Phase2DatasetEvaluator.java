@@ -47,9 +47,10 @@ import java.util.Set;
  * geometry into every saved high-resolution RGB camera, and emits numerical/visual diagnostics.
  *
  * <p>This class intentionally does not invoke any 3DGS trainer or differentiable rasterizer.
- * The RGB/depth-edge absolute pixel threshold remains intentionally unfrozen until Pixel 10a evidence
- * is reviewed. v1.0.8 adds signed and quadrant edge offsets to the Drive JSON so that review can be
- * performed remotely without asking the user to export overlay image files manually.
+ * v1.0.8 measured the first Pixel 10a baseline and exposed signed/quadrant offsets in Drive.
+ * That reviewed run had five-view median edge errors 4.47-6.00 px and zero cross-view systematic
+ * offset, so v1.0.9 freezes a conservative 8 px aggregate edge-p90 gate plus a 2 px systematic
+ * offset gate before Phase 3 may start.
  */
 public final class Phase2DatasetEvaluator {
     private static final String TAG = "Phase2Eval";
@@ -76,8 +77,9 @@ public final class Phase2DatasetEvaluator {
     private static final int MAX_OVERLAY_LONG_EDGE = 1400;
     private static final int EDGE_SEARCH_RADIUS_PX = 8;
 
-    // Intentionally unset for the first Pixel 10a Phase 2 run.
-    private static final Double DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = null;
+    // Frozen after reviewing the 2026-08-10 Pixel 10a baseline in v1.0.8.
+    private static final Double DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = 8.0;
+    private static final double MAX_SYSTEMATIC_OFFSET_PX = 2.0;
 
     private static final int VOXEL_BITS = 21;
     private static final int VOXEL_OFFSET = 1 << 20;
@@ -740,6 +742,15 @@ public final class Phase2DatasetEvaluator {
                 systematicOffsetMagnitudePx = Math.hypot(systematicDxMedianPx, systematicDyMedianPx);
             }
 
+            if (!Double.isFinite(systematicOffsetMagnitudePx)) {
+                fail("depth_edge_systematic_offset_missing",
+                        "signed cross-view alignment metric is unavailable");
+            } else if (systematicOffsetMagnitudePx > MAX_SYSTEMATIC_OFFSET_PX) {
+                fail("depth_edge_systematic_offset",
+                        "systematic offset=" + systematicOffsetMagnitudePx
+                                + "px > " + MAX_SYSTEMATIC_OFFSET_PX + "px");
+            }
+
             if (DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX != null
                     && Double.isFinite(edgeP90Px)
                     && edgeP90Px > DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX) {
@@ -1083,6 +1094,7 @@ public final class Phase2DatasetEvaluator {
                 systematic.put("coordinate_semantics",
                         "+dx RGB edge right of projected depth edge; +dy RGB edge below projected depth edge");
                 systematic.put("review_source", "machine_metrics_in_drive_log_no_manual_file_export");
+                systematic.put("hard_threshold_px", MAX_SYSTEMATIC_OFFSET_PX);
                 overlayJson.put("systematic_offset_summary", systematic);
                 overlayJson.put(
                         "hard_threshold_px",
@@ -1093,7 +1105,7 @@ public final class Phase2DatasetEvaluator {
                         "threshold_policy",
                         DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX == null
                                 ? "FIRST_PIXEL10A_BASELINE_REQUIRED_DO_NOT_PASS_PHASE2_YET"
-                                : "fixed_from_prior_pixel10a_measurement");
+                                : "pixel10a_baseline_20260810_reviewed_edge_p90_8px_systematic_2px");
                 overlayJson.put("overlays", overlayResults);
                 out.put("projection_overlays", overlayJson);
 

@@ -677,20 +677,20 @@ public final class ScannerActivity extends Activity
         gaussianButton.setEnabled(false);
         saveButton.setEnabled(false);
         modeButton.setEnabled(false);
-        showOperation("3Dプレビューを準備中", "撮影データを確認しています…", 0);
+        showOperation("3Dモデルを学習中", "撮影データを確認しています…", 0);
         File datasetDirectory = new File(finalizedDatasetPath);
         new Thread(() -> {
             GaussianSplatJob.Result result = GaussianSplatJob.prepare(
                     datasetDirectory,
                     (percent, message) -> runOnUiThread(() ->
-                            showOperation("3Dプレビューを準備中", message, percent)));
+                            showOperation("3Dモデルを学習中", message, percent)));
             runOnUiThread(() -> {
                 processingModel = false;
                 gaussianButton.setEnabled(ModelProcessingCoordinator.isPhase3ProcessingEnabled());
                 if (result.success) {
                     lastModelError = "";
-                    showOperation("高品質3Dモデルを作成しました",
-                            "完成した3Dモデルを表示します。", 100);
+                    showOperation("3Dモデルを作成しました",
+                            "表示して仕上がりを確認します。", 100);
                     openViewer(datasetDirectory);
                 } else if (result.hqReady) {
                     lastModelError = "";

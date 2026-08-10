@@ -2,6 +2,8 @@ package com.sktpj.pointcloudsplatting;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.BitmapRegionDecoder;
+import android.graphics.Rect;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -32,6 +34,10 @@ import java.util.Map;
 public final class ColmapDatasetExporter {
     private static final String TAG = "ColmapExport";
     private static final int MAX_TRAIN_LONG_EDGE = 1000;
+    private static final int PHASE3_LOW_LONG_EDGE = 720;
+    private static final int PHASE3_HIGH_PATCH_WIDTH = 1280;
+    private static final int PHASE3_HIGH_PATCH_HEIGHT = 960;
+    private static final String PHASE3_STATE_FILE = "phase3_training_state.json";
     private static final float VOXEL_METERS = 0.008f;
     private static final int MAX_INITIAL_POINTS = 220_000;
     private static final int VOXEL_BITS = 21;
@@ -79,6 +85,7 @@ public final class ColmapDatasetExporter {
             JSONArray frames = transforms.getJSONArray("frames");
             if (frames.length() < 2) return Result.fail("3DGS training needs at least two saved views");
 
+            int phase3Stage = readPhase3Stage(dataset);
             File root = new File(dataset, "vksplat_data");
             File imageDir = new File(root, "images_4");
             File sparseDir = new File(root, "sparse/0");
@@ -99,20 +106,41 @@ public final class ColmapDatasetExporter {
 
                     int sourceW = frame.getInt("w");
                     int sourceH = frame.getInt("h");
-                    double trainingScale = Math.min(
-                            1.0,
-                            (double) MAX_TRAIN_LONG_EDGE / Math.max(sourceW, sourceH));
-                    int targetW = Math.max(1, (int) Math.round(sourceW * trainingScale));
-                    int targetH = Math.max(1, (int) Math.round(sourceH * trainingScale));
                     File target = new File(imageDir, source.getName());
-                    resizeJpeg(source, target, targetW, targetH);
-
-                    double sx = (double) targetW / sourceW;
-                    double sy = (double) targetH / sourceH;
-                    double fx = frame.getDouble("fl_x") * sx;
-                    double fy = frame.getDouble("fl_y") * sy;
-                    double cx = frame.getDouble("cx") * sx;
-                    double cy = frame.getDouble("cy") * sy;
+                    int targetW;
+                    int targetH;
+                    double fx;
+                    double fy;
+                    double cx;
+                    double cy;
+                    if (phase3Stage >= 3) {
+                        targetW = Math.min(sourceW, PHASE3_HIGH_PATCH_WIDTH);
+                        targetH = Math.min(sourceH, PHASE3_HIGH_PATCH_HEIGHT);
+                        int left = clampInt(
+                                (int) Math.round(frame.getDouble("cx") - targetW * 0.5),
+                                0, Math.max(0, sourceW - targetW));
+                        int top = clampInt(
+                                (int) Math.round(frame.getDouble("cy") - targetH * 0.5),
+                                0, Math.max(0, sourceH - targetH));
+                        cropJpeg(source, target, new Rect(left, top, left + targetW, top + targetH));
+                        fx = frame.getDouble("fl_x");
+                        fy = frame.getDouble("fl_y");
+                        cx = frame.getDouble("cx") - left;
+                        cy = frame.getDouble("cy") - top;
+                    } else {
+                        int longEdge = phase3Stage == 1 ? PHASE3_LOW_LONG_EDGE : MAX_TRAIN_LONG_EDGE;
+                        double trainingScale = Math.min(
+                                1.0, (double) longEdge / Math.max(sourceW, sourceH));
+                        targetW = Math.max(1, (int) Math.round(sourceW * trainingScale));
+                        targetH = Math.max(1, (int) Math.round(sourceH * trainingScale));
+                        resizeJpeg(source, target, targetW, targetH);
+                        double sx = (double) targetW / sourceW;
+                        double sy = (double) targetH / sourceH;
+                        fx = frame.getDouble("fl_x") * sx;
+                        fy = frame.getDouble("fl_y") * sy;
+                        cx = frame.getDouble("cx") * sx;
+                        cy = frame.getDouble("cy") * sy;
+                    }
                     int id = i + 1;
                     cameras.write(String.format(Locale.US,
                             "%d PINHOLE %d %d %.10f %.10f %.10f %.10f\n",
@@ -133,12 +161,13 @@ public final class ColmapDatasetExporter {
             }
 
             notifyProgress(listener, 39, "3Dの初期位置をまとめています…");
-            File[] depthFiles = dataset.listFiles((dir, name) ->
-                    name.endsWith(".ply")
-                            && (name.startsWith("frame_") || name.startsWith("depth_prior_")));
-            if (depthFiles == null) depthFiles = new File[0];
-            Arrays.sort(depthFiles, Comparator.comparing(File::getName));
-            DiagnosticLog.i(TAG, "Depth prior source files=" + depthFiles.length);
+            File phase2Geometry = new File(dataset, "phase2_geometry_prior.ply");
+            if (!Phase2DatasetEvaluator.hasStoredPass(dataset)
+                    || !phase2Geometry.isFile() || phase2Geometry.length() <= 0L) {
+                return Result.fail("Phase 2の3D形状検証が完了していません");
+            }
+            File[] depthFiles = {phase2Geometry};
+            DiagnosticLog.i(TAG, "Phase 3 geometry source=phase2_geometry_prior.ply");
 
             Map<Long, PointAccumulator> points = collectDepthPoints(depthFiles, 0.05f);
             if (points.size() < 256) {
@@ -169,8 +198,13 @@ public final class ColmapDatasetExporter {
             meta.put("source", "pointCloudSplating continuous ARCore CPU RGB + ARCore Raw Depth");
             meta.put("frame_count", frames.length());
             meta.put("initial_point_count", points.size());
-            meta.put("training_image_policy",
-                    "preserve aspect ratio; max long edge " + MAX_TRAIN_LONG_EDGE + " px; never upscale");
+            meta.put("phase3_stage", phase3Stage);
+            meta.put("geometry_source", "phase2_geometry_prior.ply");
+            meta.put("training_image_policy", phase3Stage >= 3
+                    ? "native-resolution principal-point crop up to 1280x960; never upscale"
+                    : "preserve aspect ratio; max long edge "
+                            + (phase3Stage == 1 ? PHASE3_LOW_LONG_EDGE : MAX_TRAIN_LONG_EDGE)
+                            + " px; never upscale");
             meta.put("training_image_dir", "images_4");
             meta.put("coordinate_system", "datasetRootAnchor; OpenGL c2w converted to COLMAP w2c");
             writeText(new File(root, "export.json"), meta.toString(2));
@@ -285,6 +319,41 @@ public final class ColmapDatasetExporter {
             case "int": case "uint": case "float": case "int32": case "uint32": case "float32": return 4;
             case "double": case "float64": case "int64": case "uint64": return 8;
             default: throw new IOException("unsupported PLY type " + type);
+        }
+    }
+
+    private static int readPhase3Stage(File dataset) {
+        File state = new File(dataset, PHASE3_STATE_FILE);
+        if (!state.isFile()) return 0;
+        try {
+            return new JSONObject(readText(state)).optInt("current_stage", 0);
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private static int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static void cropJpeg(File source, File target, Rect region) throws IOException {
+        BitmapRegionDecoder decoder = null;
+        Bitmap cropped = null;
+        try {
+            decoder = BitmapRegionDecoder.newInstance(source.getAbsolutePath(), false);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            options.inScaled = false;
+            cropped = decoder.decodeRegion(region, options);
+            if (cropped == null) throw new IOException("region decode failed " + source.getName());
+            try (FileOutputStream output = new FileOutputStream(target)) {
+                if (!cropped.compress(Bitmap.CompressFormat.JPEG, 96, output)) {
+                    throw new IOException("crop JPEG compression failed " + source.getName());
+                }
+            }
+        } finally {
+            if (cropped != null) cropped.recycle();
+            if (decoder != null) decoder.recycle();
         }
     }
 
