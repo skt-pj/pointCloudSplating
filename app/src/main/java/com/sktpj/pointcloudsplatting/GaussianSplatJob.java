@@ -193,6 +193,14 @@ public final class GaussianSplatJob {
         if (context == null || datasetDirectory == null || !datasetDirectory.isDirectory()) {
             return Result.fail("撮影データが見つかりませんでした。", 0);
         }
+        if (!Phase1DatasetEvaluator.hasStoredPass(datasetDirectory)) {
+            DiagnosticLog.w(TAG,
+                    "Downstream 3D processing blocked: PHASE1_EVAL is not PASS dataset="
+                            + datasetDirectory.getAbsolutePath());
+            return Result.fail(
+                    "撮影データの検証がPASSしていないため、3D処理を開始しません。診断ログを確認してください。",
+                    0);
+        }
         File transformsFile = new File(datasetDirectory, "transforms.json");
         if (!transformsFile.isFile()) {
             return Result.fail("撮影データの保存が完了していません。", 0);
