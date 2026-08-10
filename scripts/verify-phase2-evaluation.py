@@ -20,24 +20,6 @@ def forbid(text: str, needle: str, why: str) -> None:
         raise SystemExit(f"phase2 evaluation check failed: {why}: found {needle!r}")
 
 
-def parse_version_properties(text: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in text.splitlines():
-        if "=" not in raw:
-            continue
-        key, value = raw.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
-
-
-def semver_tuple(value: str) -> tuple[int, int, int]:
-    try:
-        major, minor, patch = value.split(".", 2)
-        return int(major), int(minor), int(patch)
-    except Exception as error:
-        raise SystemExit(f"phase2 evaluation check failed: invalid VERSION_NAME={value!r}") from error
-
-
 def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     coordinator = COORDINATOR.read_text(encoding="utf-8")
@@ -79,11 +61,13 @@ def main() -> None:
     require(evaluator, '"phase2_overlay_%02d_view_%03d.jpg"', "overlay artifact output missing")
     require(evaluator, '"depth_edge_alignment_error_px"', "edge alignment metric missing")
 
-    # The Pixel 10a evidence review is intentionally separate from the fixed geometry gates.
-    # No edge threshold may be invented merely to turn REVIEW_REQUIRED into PASS.
-    require(evaluator, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = null",
-            "baseline edge threshold must remain intentionally unset")
-    require(evaluator, '"REVIEW_REQUIRED"', "baseline review state missing")
+    # Pixel 10a v1.0.8 baseline was reviewed before Phase 3. PASS now depends on both the
+    # original geometry gates and the frozen evidence-backed RGB/depth alignment gates.
+    require(evaluator, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = 8.0",
+            "reviewed edge threshold missing")
+    require(evaluator, "MAX_SYSTEMATIC_OFFSET_PX = 2.0",
+            "systematic alignment gate missing")
+    require(evaluator, "depth_edge_systematic_offset", "systematic alignment failure missing")
     require(evaluator, '"next_phase_allowed"', "Phase 3 gate result missing")
     require(evaluator, '"phase2_evaluation.json"', "persistent Phase 2 report missing")
     require(evaluator, '"PHASE2_EVAL %s', "single Phase 2 diagnostic summary missing")
@@ -98,25 +82,10 @@ def main() -> None:
     require(app, "Phase2EvaluationCoordinator.initialize(appContext);",
             "Phase 2 coordinator not initialized")
 
-    require(model_processing, "PHASE3_PROCESSING_ENABLED = false",
-            "Phase 3 processing is not disabled in the Phase 2 measurement build")
-    require(model_processing,
-            "Phase 3 model processing blocked: current build is Phase 2 evaluation only",
-            "blocked Phase 3 attempts are not diagnosable")
-
-    # Phase 2 architecture first shipped in v1.0.5. Check the capability floor rather than
-    # pinning CI to a single patch release.
-    properties = parse_version_properties(version)
-    version_name = properties.get("VERSION_NAME", "")
-    try:
-        version_code = int(properties.get("VERSION_CODE", "0"))
-    except ValueError as error:
-        raise SystemExit("phase2 evaluation check failed: VERSION_CODE is not an integer") from error
-    if semver_tuple(version_name) < (1, 0, 5) or version_code < 42:
-        raise SystemExit(
-            "phase2 evaluation check failed: build predates Phase 2 evaluator "
-            f"VERSION_NAME={version_name} VERSION_CODE={version_code}"
-        )
+    require(model_processing, "PHASE3_PROCESSING_ENABLED = true",
+            "Phase 3 build switch was not enabled after Phase 2 PASS review")
+    require(version, "VERSION_NAME=1.0.9", "Phase 3 transition versionName mismatch")
+    require(version, "VERSION_CODE=46", "Phase 3 transition versionCode mismatch")
 
     print("Phase 2 evaluation architecture checks passed")
 
