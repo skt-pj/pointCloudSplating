@@ -17,7 +17,9 @@ import java.security.MessageDigest;
 public final class NativeGaussianTrainer {
     private static final String TAG = "Native3DGS";
     private static final String ASSET_ROOT = "vksplat_shader";
-    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6";
+    // Kept as an explicit legacy identifier so diagnostics can distinguish a stale v1.0.1 cache.
+    private static final String LEGACY_SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6";
+    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v7";
     private static final String CHECKPOINT_FILE = "3dgs_checkpoint.bin";
 
     // These are defaults for the first mobile run, not a quality ceiling. Additional runs may use
@@ -105,13 +107,17 @@ public final class NativeGaussianTrainer {
             File shaderDir = ensureShaderFiles(context);
             DiagnosticLog.i(TAG,
                     "Using VkSplat shader cache=" + shaderDir.getName()
-                            + " cumsum=glslc256 radix=glslc256/subgroup16"
+                            + " legacyCache=" + LEGACY_SHADER_CACHE
+                            + " cumsum=glslc256 radix=glslc256/subgroup16/two_stage_no_global_atomic"
                             + " requestedSteps=" + requestedSteps
                             + " checkpointBefore=" + checkpointBeforeRun);
             logCumsumShaderIdentity(shaderDir, "cumsum_single_pass.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_block_scan.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_scan_block_sums.spv");
             logCumsumShaderIdentity(shaderDir, "cumsum_add_block_offsets.spv");
+            logRadixShaderIdentity(shaderDir, "upsweep.spv");
+            logRadixShaderIdentity(shaderDir, "spine.spv");
+            logRadixShaderIdentity(shaderDir, "downsweep.spv");
 
             String cumsumFailure = ensureCumsumConformance(shaderDir, listener);
             if (cumsumFailure != null) {
@@ -309,10 +315,20 @@ public final class NativeGaussianTrainer {
 
     private static void logCumsumShaderIdentity(File shaderDir, String fileName) throws IOException {
         File file = new File(new File(shaderDir, "generated"), fileName);
+        logShaderIdentity("cumsum", fileName, file);
+    }
+
+    private static void logRadixShaderIdentity(File shaderDir, String fileName) throws IOException {
+        File file = new File(new File(shaderDir, "radix_sort"), fileName);
+        logShaderIdentity("radix", fileName, file);
+    }
+
+    private static void logShaderIdentity(String family, String fileName, File file)
+            throws IOException {
         if (!file.isFile() || file.length() <= 0L) {
-            throw new IOException("VkSplat cumsum shader missing: " + fileName);
+            throw new IOException("VkSplat " + family + " shader missing: " + fileName);
         }
-        DiagnosticLog.i(TAG, "VkSplat cumsum shader=" + fileName
+        DiagnosticLog.i(TAG, "VkSplat " + family + " shader=" + fileName
                 + " bytes=" + file.length() + " sha256=" + sha256(file));
     }
 
