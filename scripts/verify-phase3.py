@@ -34,7 +34,6 @@ def main() -> None:
     native = NATIVE.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
 
-    # The reviewed Phase 2 evidence must be a real stored PASS before Phase 3 can enter.
     require(phase2, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = 8.0",
             "reviewed Pixel 10a edge gate missing")
     require(phase2, "MAX_SYSTEMATIC_OFFSET_PX = 2.0",
@@ -43,7 +42,6 @@ def main() -> None:
             "Phase 3 does not enforce stored Phase 2 PASS")
     require(processing, "PHASE3_PROCESSING_ENABLED = true", "Phase 3 switch is disabled")
 
-    # Geometry source-of-truth is Phase 2 fused independent Depth, not legacy RGB-paired PLYs.
     require(exporter, 'new File(dataset, "phase2_geometry_prior.ply")',
             "Phase 2 geometry prior is not consumed")
     require(exporter, "Phase2DatasetEvaluator.hasStoredPass(dataset)",
@@ -53,7 +51,6 @@ def main() -> None:
     require(exporter, 'meta.put("geometry_source", "phase2_geometry_prior.ply")',
             "geometry provenance is not persisted")
 
-    # Progressive photometric training preserves originals while changing only the working images.
     require(exporter, "PHASE3_LOW_LONG_EDGE = 720", "low-resolution stage missing")
     require(exporter, "MAX_TRAIN_LONG_EDGE = 1000", "medium-resolution stage missing")
     require(exporter, "PHASE3_HIGH_PATCH_WIDTH = 1280", "high-resolution patch width missing")
@@ -68,7 +65,6 @@ def main() -> None:
     require(trainer, "phase3_stage_result.json", "intermediate stages can be confused with final output")
     require(job, "NativeGaussianTrainer.trainProgressiveInitial", "initial job bypasses progressive training")
 
-    # This must remain a real differentiable rasterized trainer, not an appearance-fit shortcut.
     require(native, "executeProjectionForward", "projection forward missing")
     require(native, "executeRasterizeForward", "raster forward missing")
     require(native, "executeComputeSSIMGradient", "SSIM/L1 gradient missing")
@@ -77,19 +73,19 @@ def main() -> None:
     require(native, "executeMCMCPostBackward", "density control missing")
     require(native, "restoreTrainingCheckpoint", "stage-to-stage optimizer checkpoint restore missing")
 
-    # Hold-out views are excluded from optimizer views and rendered for auxiliary quality metrics.
     require(native, "frameCount >= 8 ? 5", "hold-out split missing")
     require(native, "ValidationMetrics", "hold-out metric aggregation missing")
     require(native, "blockSsim", "hold-out SSIM missing")
     require(native, "phase3_holdout_render_", "hold-out render artifact missing")
-    require(native, '"validation_ssim"', "native result does not report SSIM")
-    require(native, '"validation_view_count"', "native result does not report hold-out view count")
+    # C++ JSON keys are embedded in escaped string literals, so check the key tokens rather than
+    # a Java/Python-style quoted literal.
+    require(native, "validation_ssim", "native result does not report SSIM")
+    require(native, "validation_view_count", "native result does not report hold-out view count")
     require(trainer, 'result.put("holdout_view_count", validationViews)',
             "hold-out view count is not persisted")
     require(trainer, 'result.put("validation_ssim", ssim)',
             "hold-out SSIM is not persisted")
 
-    # Machine checks may only reach REVIEW_REQUIRED. Final visual quality is a user/viewer gate.
     require(phase3, '"phase3_evaluation.json"', "Phase 3 report missing")
     require(phase3, 'String status = machinePass ? "REVIEW_REQUIRED" : "FAIL"',
             "machine metrics can incorrectly auto-PASS final quality")
