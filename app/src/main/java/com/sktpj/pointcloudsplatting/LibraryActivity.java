@@ -6,7 +6,6 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.text.InputType;
@@ -29,9 +28,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -47,6 +44,7 @@ public final class LibraryActivity extends Activity {
     private static final String TAG = "PointCloudLibrary";
     private static final int REQUEST_SAVE_LOG = 1201;
     private static final int MENU_SAVE_LOG = 1;
+    private static final int MENU_CHANGE_LOG_DESTINATION = 2;
     private static final int CARD_THUMBNAIL_HEIGHT_DP = 150;
     private static final String FINAL_SPLAT = "splat.ply";
     private static final String PREVIEW_SPLAT = "preview_splat.ply";
@@ -56,10 +54,9 @@ public final class LibraryActivity extends Activity {
     private GridLayout grid;
     private TextView emptyView;
     private volatile boolean generationInProgress;
-    private volatile String pendingDiagnosticReport;
 
     @Override protected void onCreate(Bundle savedInstanceState){super.onCreate(savedInstanceState);setContentView(buildContentView());}
-    @Override protected void onResume(){super.onResume();reloadLibrary();}
+    @Override protected void onResume(){super.onResume();reloadLibrary();DriveDiagnosticLogStore.requestOverwrite();}
 
     private View buildContentView(){
         LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(0xFF101010);
@@ -74,15 +71,43 @@ public final class LibraryActivity extends Activity {
         root.setOnApplyWindowInsetsListener((view,insets)->{int top=insets.getSystemWindowInsetTop(),bottom=insets.getSystemWindowInsetBottom(),left=insets.getSystemWindowInsetLeft(),right=insets.getSystemWindowInsetRight();if(android.os.Build.VERSION.SDK_INT>=28&&insets.getDisplayCutout()!=null){android.view.DisplayCutout c=insets.getDisplayCutout();top=Math.max(top,c.getSafeInsetTop());bottom=Math.max(bottom,c.getSafeInsetBottom());left=Math.max(left,c.getSafeInsetLeft());right=Math.max(right,c.getSafeInsetRight());}root.setPadding(left,top+dp(12),right,bottom+dp(8));return insets;});root.post(root::requestApplyInsets);return root;
     }
 
-    private void showLibraryMenu(View anchor){PopupMenu popup=new PopupMenu(this,anchor);popup.getMenu().add(0,MENU_SAVE_LOG,0,"ログを保存");popup.setOnMenuItemClickListener(item->{if(item.getItemId()==MENU_SAVE_LOG){saveDiagnosticLog();return true;}return false;});popup.show();}
+    private void showLibraryMenu(View anchor){
+        PopupMenu popup=new PopupMenu(this,anchor);
+        boolean configured=DriveDiagnosticLogStore.hasDestination(this);
+        popup.getMenu().add(0,MENU_SAVE_LOG,0,configured?"Driveログを更新":"Driveログ保存先を設定");
+        if(configured)popup.getMenu().add(0,MENU_CHANGE_LOG_DESTINATION,1,"Driveログ保存先を変更");
+        popup.setOnMenuItemClickListener(item->{
+            if(item.getItemId()==MENU_SAVE_LOG){saveDiagnosticLog();return true;}
+            if(item.getItemId()==MENU_CHANGE_LOG_DESTINATION){chooseDriveDiagnosticDestination();return true;}
+            return false;
+        });
+        popup.show();
+    }
 
-    private void saveDiagnosticLog(){Toast.makeText(this,"ログを準備しています…",Toast.LENGTH_SHORT).show();new Thread(()->{String report=buildDiagnosticReport();runOnUiThread(()->{pendingDiagnosticReport=report;Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("text/plain");intent.putExtra(Intent.EXTRA_TITLE,"pointCloudSplating-diagnostics-"+new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(new Date())+".txt");startActivityForResult(intent,REQUEST_SAVE_LOG);});},"PrepareLibraryDiagnostics").start();}
+    private void saveDiagnosticLog(){
+        if(!DriveDiagnosticLogStore.hasDestination(this)){chooseDriveDiagnosticDestination();return;}
+        Toast.makeText(this,"Driveのログを更新しています…",Toast.LENGTH_SHORT).show();
+        DriveDiagnosticLogStore.overwriteNow((success,message)->runOnUiThread(()->
+                Toast.makeText(this,message,success?Toast.LENGTH_SHORT:Toast.LENGTH_LONG).show()));
+    }
 
-    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(requestCode!=REQUEST_SAVE_LOG)return;if(resultCode!=RESULT_OK||data==null||data.getData()==null){pendingDiagnosticReport=null;return;}Uri uri=data.getData();String report=pendingDiagnosticReport;pendingDiagnosticReport=null;new Thread(()->{try(OutputStream out=getContentResolver().openOutputStream(uri,"w")){if(out==null)throw new IOException("output stream unavailable");out.write((report==null?"":report).getBytes(StandardCharsets.UTF_8));out.flush();runOnUiThread(()->Toast.makeText(this,"ログを保存しました",Toast.LENGTH_SHORT).show());}catch(IOException|RuntimeException e){DiagnosticLog.e(TAG,"Failed to save diagnostics",e);runOnUiThread(()->Toast.makeText(this,"ログを保存できませんでした",Toast.LENGTH_LONG).show());}},"SaveLibraryDiagnostics").start();}
+    private void chooseDriveDiagnosticDestination(){
+        Toast.makeText(this,"Google Driveで保存先を選択してください",Toast.LENGTH_SHORT).show();
+        startActivityForResult(DriveDiagnosticLogStore.createDestinationIntent(),REQUEST_SAVE_LOG);
+    }
 
-    private String buildDiagnosticReport(){return new StringBuilder().append("pointCloudSplating diagnostics\n").append("version=").append(BuildConfig.VERSION_NAME).append('\n').append("manufacturer=").append(android.os.Build.MANUFACTURER).append('\n').append("model=").append(android.os.Build.MODEL).append('\n').append("device=").append(android.os.Build.DEVICE).append('\n').append("sdk=").append(android.os.Build.VERSION.SDK_INT).append('\n').append("screen=library\n\n").append("=== in-app log ===\n").append(DiagnosticLog.snapshot()).append("\n=== process logcat ===\n").append(readOwnLogcat()).toString();}
-
-    private static String readOwnLogcat(){StringBuilder out=new StringBuilder();java.lang.Process process=null;try{process=Runtime.getRuntime().exec(new String[]{"logcat","-d","-v","threadtime","--pid="+android.os.Process.myPid()});try(BufferedReader reader=new BufferedReader(new InputStreamReader(process.getInputStream()))){String line;while((line=reader.readLine())!=null){out.append(line).append('\n');if(out.length()>200_000){out.append("[logcat truncated]\n");break;}}}}catch(IOException|RuntimeException e){out.append("logcat unavailable: ").append(e).append('\n');}finally{if(process!=null)process.destroy();}return out.toString();}
+    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
+        super.onActivityResult(requestCode,resultCode,data);
+        if(requestCode!=REQUEST_SAVE_LOG)return;
+        if(resultCode!=RESULT_OK||data==null||data.getData()==null)return;
+        if(!DriveDiagnosticLogStore.registerDestination(this,data)){
+            Toast.makeText(this,"Driveの保存先を設定できませんでした",Toast.LENGTH_LONG).show();
+            return;
+        }
+        Toast.makeText(this,"Driveログを設定しました。以後は同じファイルを上書きします",Toast.LENGTH_SHORT).show();
+        DriveDiagnosticLogStore.overwriteNow((success,message)->runOnUiThread(()->
+                Toast.makeText(this,message,success?Toast.LENGTH_SHORT:Toast.LENGTH_LONG).show()));
+    }
 
     private void reloadLibrary(){File pictures=getExternalFilesDir(Environment.DIRECTORY_PICTURES);List<File>datasets=findSavedDatasets(pictures);grid.removeAllViews();emptyView.setVisibility(datasets.isEmpty()?View.VISIBLE:View.GONE);for(File dataset:datasets){migrateLegacyArtifacts(dataset);grid.addView(createDatasetCard(dataset));}}
 
