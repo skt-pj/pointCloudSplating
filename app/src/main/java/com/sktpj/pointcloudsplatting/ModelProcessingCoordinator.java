@@ -14,11 +14,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class ModelProcessingCoordinator {
     private static final String TAG = "ModelProcessing";
     /**
-     * v1.0.5 is a Phase 2 measurement build. Keep the old Phase 3 trainer physically present for
-     * regression checks, but do not allow UI actions to start it until Phase 2 has a real-device
-     * PASS and Phase 3 work is explicitly enabled in a later build.
+     * Phase 3 is enabled only after the v1.0.9 Phase 2 evaluator has a stored PASS for the dataset.
+     * GaussianSplatJob enforces that dataset-level gate before this coordinator is entered.
      */
-    private static final boolean PHASE3_PROCESSING_ENABLED = false;
+    private static final boolean PHASE3_PROCESSING_ENABLED = true;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Object LOCK = new Object();
 
@@ -33,9 +32,8 @@ final class ModelProcessingCoordinator {
     static boolean enter(Context context) {
         if (context == null) return false;
         if (!PHASE3_PROCESSING_ENABLED) {
-            DiagnosticLog.w(
-                    TAG,
-                    "Phase 3 model processing blocked: current build is Phase 2 evaluation only");
+            DiagnosticLog.w(TAG,
+                    "Phase 3 model processing blocked: build-level Phase 3 switch is disabled");
             return false;
         }
 
@@ -44,7 +42,7 @@ final class ModelProcessingCoordinator {
         synchronized (LOCK) {
             active = true;
             latestProgress = 0;
-            latestMessage = "撮影を停止して変換用メモリを確保しています…";
+            latestMessage = "撮影を停止して3Dモデル用のメモリを確保しています…";
             resumedLatch = latch;
         }
 
@@ -88,7 +86,7 @@ final class ModelProcessingCoordinator {
                 "Scanner suspended before 3DGS: clearedDepthFrames=" + clearedDepthFrames
                         + " javaUsedBeforeGcMB=" + toMb(beforeGc)
                         + " javaUsedAfterGcMB=" + toMb(afterGc));
-        publishProgress(1, "カメラを停止しました。3Dモデルを変換しています…");
+        publishProgress(1, "カメラを停止しました。3Dモデルを学習しています…");
         return true;
     }
 
