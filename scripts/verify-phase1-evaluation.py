@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/Phase1DatasetEvaluator.java"
 FINALIZER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinalizer.java"
 JOB = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java"
+DEPTH_DATA = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DepthData.java"
 VERSION = ROOT / "version.properties"
 
 
@@ -41,6 +42,7 @@ def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     finalizer = FINALIZER.read_text(encoding="utf-8")
     job = JOB.read_text(encoding="utf-8")
+    depth_data = DEPTH_DATA.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
 
     # Phase 1 evaluates captured observations only. Training/geometry build belongs to later phases.
@@ -66,6 +68,14 @@ def main() -> None:
     require(evaluator, '"PHASE1_EVAL %s', "single PASS/FAIL diagnostic line missing")
     require(evaluator, '"phase1_evaluation.json"', "persistent evaluation report missing")
     require(evaluator, '"next_phase_allowed"', "next-phase gate result missing")
+
+    # ScannerActivity probes Raw Depth and DepthData reacquires it. The actual image timestamp must
+    # be de-duplicated so an ARCore update between those two acquisitions cannot be spooled twice.
+    require(depth_data, "lastAcceptedRawDepthTimestampNs", "actual Raw Depth dedup state missing")
+    require(depth_data, "rawDepthTimestampNs == lastAcceptedRawDepthTimestampNs",
+            "duplicate actual Raw Depth timestamp is not rejected")
+    require(depth_data, "lastAcceptedRawDepthTimestampNs = rawDepthTimestampNs",
+            "accepted Raw Depth timestamp is not committed")
 
     require(finalizer, "Phase1DatasetEvaluator.evaluate(workingDirectory)",
             "finalization does not execute Phase 1 evaluation")
