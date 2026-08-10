@@ -41,17 +41,24 @@ def main() -> None:
     require(store, "AUTO_SYNC_DELAY_SECONDS", "automatic remote refresh is missing")
     forbid(store, 'openOutputStream(uri, "wa")', "append mode is forbidden")
 
-    # v1.0.4 incorrectly let a newer capture_tmp directory hide the last finalized dataset.
+    # v1.0.4 incorrectly let capture_tmp hide a finalized evaluation. A persisted older primary
+    # also must not hide a newly finalized PASS or FAIL dataset in later builds.
     require(store, 'PREF_PRIMARY_DATASET_PATH = "primary_dataset_path"',
             "finalized dataset identity is not persisted")
     require(store, "public static void setPrimaryDataset(File dataset)",
-            "evaluators cannot select the finalized diagnostic dataset")
+            "evaluators cannot identify the finalized diagnostic dataset")
     require(store, "datasetSelection=last_finalized_preferred",
             "report does not expose finalized-first selection policy")
     require(store, 'file.getName().startsWith("dataset_")',
             "finalized dataset selection missing")
     require(store, 'new File(file, ".saved").isFile()',
             "finalized dataset marker is not required")
+    require(store, "Comparator.comparing(File::getName).reversed()",
+            "newest finalized dataset is not selected by capture timestamp name")
+    require(store, "preferred.getName().compareTo(newest.getName()) >= 0",
+            "an older persisted primary can still hide a newer finalized dataset")
+    require(store, 'file.getName().startsWith("capture_tmp_")',
+            "temporary diagnostic fallback missing")
 
     require(log, "public static synchronized String currentProcessSnapshot()",
             "current-process log view missing")
