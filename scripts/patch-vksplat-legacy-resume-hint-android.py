@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import runpy
 
 root = Path("app/src/main/cpp/third_party/vksplat/vksplat/src")
 header_path = root / "gs_trainer.h"
@@ -40,3 +41,7 @@ source = source.replace(old_publish, new_publish, 1)
 
 source_path.write_text(source)
 print("Patched VkSplat legacy PLY continuation hint bridge")
+
+# This script is the final vendored-source patch invoked by the Android preparation pipeline.
+# Apply numerical guards here so they are present before Slang compiles projection/MCMC/optimizer SPIR-V.
+runpy.run_path("scripts/patch-vksplat-long-training-stability.py", run_name="__main__")
