@@ -20,6 +20,24 @@ def forbid(text: str, needle: str, why: str) -> None:
         raise SystemExit(f"Drive diagnostics check failed: {why}: found {needle!r}")
 
 
+def parse_version_properties(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        if "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def semver_tuple(value: str) -> tuple[int, int, int]:
+    try:
+        major, minor, patch = value.split(".", 2)
+        return int(major), int(minor), int(patch)
+    except Exception as error:
+        raise SystemExit(f"Drive diagnostics check failed: invalid VERSION_NAME={value!r}") from error
+
+
 def main() -> None:
     store = STORE.read_text(encoding="utf-8")
     log = LOG.read_text(encoding="utf-8")
@@ -72,8 +90,19 @@ def main() -> None:
     forbid(library, "pointCloudSplating-diagnostics-",
             "timestamped diagnostic copies must not be created")
 
-    require(version, "VERSION_NAME=1.0.7", "versionName must identify Phase 2/UI fix build")
-    require(version, "VERSION_CODE=44", "versionCode must identify Phase 2/UI fix build")
+    # Drive overwrite support first shipped in v1.0.4. Keep this verifier tied to the
+    # capability floor, not one exact app version, so later Phase builds do not fail CI.
+    properties = parse_version_properties(version)
+    version_name = properties.get("VERSION_NAME", "")
+    try:
+        version_code = int(properties.get("VERSION_CODE", "0"))
+    except ValueError as error:
+        raise SystemExit("Drive diagnostics check failed: VERSION_CODE is not an integer") from error
+    if semver_tuple(version_name) < (1, 0, 4) or version_code < 41:
+        raise SystemExit(
+            "Drive diagnostics check failed: build predates Drive overwrite support "
+            f"VERSION_NAME={version_name} VERSION_CODE={version_code}"
+        )
 
     print("Drive diagnostics overwrite checks passed")
 
