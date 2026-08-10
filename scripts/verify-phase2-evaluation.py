@@ -35,6 +35,11 @@ def main() -> None:
     require(evaluator, 'name.startsWith("depth_obs_")',
             "independent Depth Observation source-of-truth missing")
     require(evaluator, "MIN_CONFIDENCE = 0.30f", "confidence filtering missing")
+    require(evaluator, "depthExcludedQualityCount", "quality-only Depth exclusion tracking missing")
+    require(evaluator, 'warn("depth_observation_no_usable_points"',
+            "quality-only Depth observations must be excluded without hard-failing the dataset")
+    require(evaluator, '"depth_observation_excluded_quality_count"',
+            "quality-only exclusion count missing from report")
     require(evaluator, "FUSION_VOXEL_METERS = 0.008f", "voxel fusion missing")
     require(evaluator, "removeIsolatedFusionVoxels", "outlier/isolated voxel filtering missing")
     require(evaluator, '"phase2_geometry_prior.ply"', "fused geometry artifact missing")
@@ -57,9 +62,9 @@ def main() -> None:
     require(evaluator, '"phase2_overlay_%02d_view_%03d.jpg"', "overlay artifact output missing")
     require(evaluator, '"depth_edge_alignment_error_px"', "edge alignment metric missing")
 
-    # First Pixel 10a measurement must not invent an edge threshold just to produce PASS.
+    # Pixel 10a baseline review must not invent an edge threshold just to produce PASS.
     require(evaluator, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = null",
-            "first-run edge threshold must remain intentionally unset")
+            "baseline edge threshold must remain intentionally unset")
     require(evaluator, '"REVIEW_REQUIRED"', "baseline review state missing")
     require(evaluator, '"next_phase_allowed"', "Phase 3 gate result missing")
     require(evaluator, '"phase2_evaluation.json"', "persistent Phase 2 report missing")
@@ -75,16 +80,15 @@ def main() -> None:
     require(app, "Phase2EvaluationCoordinator.initialize(appContext);",
             "Phase 2 coordinator not initialized")
 
-    # The legacy Phase 3 trainer remains compiled for regression checks, but the Phase 2 APK must
-    # not permit UI paths to start it before Phase 2 has passed on a real device.
+    # Phase 3 remains unavailable in this Phase 2 correction build.
     require(model_processing, "PHASE3_PROCESSING_ENABLED = false",
             "Phase 3 processing is not disabled in the Phase 2 measurement build")
     require(model_processing,
             "Phase 3 model processing blocked: current build is Phase 2 evaluation only",
             "blocked Phase 3 attempts are not diagnosable")
 
-    require(version, "VERSION_NAME=1.0.6", "Phase 2 build versionName mismatch")
-    require(version, "VERSION_CODE=43", "Phase 2 build versionCode mismatch")
+    require(version, "VERSION_NAME=1.0.7", "Phase 2 build versionName mismatch")
+    require(version, "VERSION_CODE=44", "Phase 2 build versionCode mismatch")
 
     print("Phase 2 evaluation architecture checks passed")
 
