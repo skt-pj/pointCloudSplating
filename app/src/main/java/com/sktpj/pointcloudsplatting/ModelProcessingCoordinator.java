@@ -13,6 +13,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Coordinates an opaque processing Activity so scanner camera/AR/GL resources are paused first. */
 final class ModelProcessingCoordinator {
     private static final String TAG = "ModelProcessing";
+    /**
+     * v1.0.5 is a Phase 2 measurement build. Keep the old Phase 3 trainer physically present for
+     * regression checks, but do not allow UI actions to start it until Phase 2 has a real-device
+     * PASS and Phase 3 work is explicitly enabled in a later build.
+     */
+    private static final boolean PHASE3_PROCESSING_ENABLED = false;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Object LOCK = new Object();
 
@@ -26,6 +32,12 @@ final class ModelProcessingCoordinator {
 
     static boolean enter(Context context) {
         if (context == null) return false;
+        if (!PHASE3_PROCESSING_ENABLED) {
+            DiagnosticLog.w(
+                    TAG,
+                    "Phase 3 model processing blocked: current build is Phase 2 evaluation only");
+            return false;
+        }
 
         final CountDownLatch latch = new CountDownLatch(1);
         final AtomicBoolean launchFailed = new AtomicBoolean(false);
