@@ -50,6 +50,9 @@ jobs:
       - name: Apply v1.0.8 Phase 2 self-evaluation metrics
         run: python3 scripts/apply-v1.0.8-phase2-self-eval.py
 
+      - name: Apply v1.0.9 Phase 3 pipeline
+        run: python3 scripts/apply-v1.0.9-phase3.py
+
       - name: Verify Drive diagnostics overwrite
         run: python3 scripts/verify-drive-diagnostics.py
 
@@ -62,8 +65,11 @@ jobs:
       - name: Verify Phase 2 self-evaluation metrics
         run: python3 scripts/verify-phase2-self-eval.py
 
-      - name: Verify Phase 2 user-facing UI
+      - name: Verify Phase 2/3 user-facing UI
         run: python3 scripts/verify-phase2-ui-ux.py
+
+      - name: Verify Phase 3 pipeline and quality gate
+        run: python3 scripts/verify-phase3.py
 
       - name: Verify mobile trainer architecture
         run: python3 scripts/verify-mobile-trainer.py
@@ -97,6 +103,27 @@ jobs:
         with:
           name: pointCloudSplating-v${{ env.VERSION_NAME }}-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Persist v1.0.9 Phase 3 sources
+        if: github.ref == 'refs/heads/agent/v1.0.9-phase3'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            app/src/main/java/com/sktpj/pointcloudsplatting/Phase2DatasetEvaluator.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/Phase3DatasetEvaluator.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/ModelProcessingCoordinator.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/ScannerActivity.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/ColmapDatasetExporter.java \
+            app/src/main/cpp/native_3dgs.cpp
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "apply v1.0.9 phase3"
+          git push origin HEAD
 
       - name: Persist v1.0.8 corrected Java sources
         if: github.ref == 'refs/heads/agent/v1.0.8-phase2-self-eval'
