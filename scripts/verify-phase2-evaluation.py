@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/Phase2DatasetEvaluator.java"
 COORDINATOR = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/Phase2EvaluationCoordinator.java"
+MODEL_PROCESSING = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/ModelProcessingCoordinator.java"
 APP = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/PointCloudApp.java"
 VERSION = ROOT / "version.properties"
 
@@ -22,6 +23,7 @@ def forbid(text: str, needle: str, why: str) -> None:
 def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     coordinator = COORDINATOR.read_text(encoding="utf-8")
+    model_processing = MODEL_PROCESSING.read_text(encoding="utf-8")
     app = APP.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
 
@@ -72,6 +74,14 @@ def main() -> None:
             "Phase 2 must not compete with active capture")
     require(app, "Phase2EvaluationCoordinator.initialize(appContext);",
             "Phase 2 coordinator not initialized")
+
+    # The legacy Phase 3 trainer remains compiled for regression checks, but the Phase 2 APK must
+    # not permit UI paths to start it before Phase 2 has passed on a real device.
+    require(model_processing, "PHASE3_PROCESSING_ENABLED = false",
+            "Phase 3 processing is not disabled in the Phase 2 measurement build")
+    require(model_processing,
+            "Phase 3 model processing blocked: current build is Phase 2 evaluation only",
+            "blocked Phase 3 attempts are not diagnosable")
 
     require(version, "VERSION_NAME=1.0.5", "Phase 2 build versionName mismatch")
     require(version, "VERSION_CODE=42", "Phase 2 build versionCode mismatch")
