@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/Phase1DatasetEvaluator.java"
 FINALIZER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinalizer.java"
+JOB = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java"
 VERSION = ROOT / "version.properties"
 
 
@@ -21,6 +22,7 @@ def forbid(text: str, needle: str, why: str) -> None:
 def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     finalizer = FINALIZER.read_text(encoding="utf-8")
+    job = JOB.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
 
     # Phase 1 evaluates captured observations only. Training/geometry build belongs to later phases.
@@ -52,6 +54,12 @@ def main() -> None:
     require(finalizer, '"phase1_evaluation_status"', "manifest evaluation status missing")
     require(finalizer, '"phase1_evaluation_required_for_phase2", true',
             "Phase 2 hard-gate contract missing")
+
+    # No current downstream path may bypass a failed/missing Phase 1 evaluation.
+    require(job, "Phase1DatasetEvaluator.hasStoredPass(datasetDirectory)",
+            "3D processing does not enforce the Phase 1 PASS gate")
+    require(job, "Downstream 3D processing blocked: PHASE1_EVAL is not PASS",
+            "blocked downstream processing is not diagnosable")
 
     require(version, "VERSION_NAME=1.0.3", "versionName must identify Phase 1 evaluator build")
     require(version, "VERSION_CODE=40", "versionCode must identify Phase 1 evaluator build")
