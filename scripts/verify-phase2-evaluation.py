@@ -83,8 +83,8 @@ def main() -> None:
             "Phase 3 model processing blocked: current build is Phase 2 evaluation only",
             "blocked Phase 3 attempts are not diagnosable")
 
-    require(version, "VERSION_NAME=1.0.5", "Phase 2 build versionName mismatch")
-    require(version, "VERSION_CODE=42", "Phase 2 build versionCode mismatch")
+    require(version, "VERSION_NAME=1.0.6", "Phase 2 build versionName mismatch")
+    require(version, "VERSION_CODE=43", "Phase 2 build versionCode mismatch")
 
     print("Phase 2 evaluation architecture checks passed")
 
