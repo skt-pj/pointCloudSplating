@@ -57,7 +57,7 @@ def main() -> None:
 
     require(library, "!ModelProcessingCoordinator.isPhase3ProcessingEnabled()",
             "library can still start unavailable Phase 3 processing")
-    require(library, '"撮影データ保存済み"',
+    require(library, "撮影データ保存済み",
             "library must represent saved data without promising model creation")
 
     require(version, "VERSION_NAME=1.0.7", "versionName mismatch")
