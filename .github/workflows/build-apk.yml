@@ -47,6 +47,9 @@ jobs:
       - name: Apply v1.0.7 Phase 2 and UI correction
         run: python3 scripts/apply-v1.0.7-phase2-ui-fix.py
 
+      - name: Apply v1.0.8 Phase 2 self-evaluation metrics
+        run: python3 scripts/apply-v1.0.8-phase2-self-eval.py
+
       - name: Verify Drive diagnostics overwrite
         run: python3 scripts/verify-drive-diagnostics.py
 
@@ -55,6 +58,9 @@ jobs:
 
       - name: Verify Phase 2 geometry and camera-view evaluation
         run: python3 scripts/verify-phase2-evaluation.py
+
+      - name: Verify Phase 2 self-evaluation metrics
+        run: python3 scripts/verify-phase2-self-eval.py
 
       - name: Verify Phase 2 user-facing UI
         run: python3 scripts/verify-phase2-ui-ux.py
@@ -92,8 +98,8 @@ jobs:
           name: pointCloudSplating-v${{ env.VERSION_NAME }}-debug
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Persist v1.0.7 corrected Java sources
-        if: github.ref == 'refs/heads/agent/v1.0.7-phase2-ui-fix'
+      - name: Persist v1.0.8 corrected Java sources
+        if: github.ref == 'refs/heads/agent/v1.0.8-phase2-self-eval'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -106,7 +112,7 @@ jobs:
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "apply v1.0.7 phase2 ui correction"
+          git commit -m "apply v1.0.8 phase2 self evaluation"
           git push origin HEAD
 
       - name: Publish latest and versioned APK into repository
