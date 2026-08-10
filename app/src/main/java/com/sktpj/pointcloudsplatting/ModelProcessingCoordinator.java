@@ -118,6 +118,10 @@ final class ModelProcessingCoordinator {
         });
     }
 
+    static boolean isPhase3ProcessingEnabled() {
+        return PHASE3_PROCESSING_ENABLED;
+    }
+
     static boolean isActive() {
         return active;
     }

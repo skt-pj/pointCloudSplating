@@ -241,6 +241,7 @@ public final class Phase2DatasetEvaluator {
         int depthObservationCount;
         int depthUsedCount;
         int depthExcludedMetadataCount;
+        int depthExcludedQualityCount;
         long rawDepthPointCount;
         long confidenceRejectedCount;
         long rangeRejectedCount;
@@ -337,8 +338,19 @@ public final class Phase2DatasetEvaluator {
                     depthObservations.add(observation);
                     depthUsedCount++;
                 } catch (Exception error) {
-                    depthExcludedMetadataCount++;
-                    fail("depth_ply_read_failed", ply.getName() + ": " + error.getMessage());
+                    String message = String.valueOf(error.getMessage());
+                    if ("no confidence-filtered sample points".equals(message)) {
+                        // The observation is structurally valid (Phase 1 already proved that),
+                        // but contributes no geometry after the Phase 2 quality filter. Exclude
+                        // it with an explicit reason; do not misclassify normal low-confidence
+                        // sensor output as a corrupt PLY or a dataset hard failure.
+                        depthExcludedQualityCount++;
+                        warn("depth_observation_no_usable_points",
+                                ply.getName() + ": all points rejected by Phase 2 confidence filter");
+                    } else {
+                        depthExcludedMetadataCount++;
+                        fail("depth_ply_read_failed", ply.getName() + ": " + message);
+                    }
                 }
             }
 
@@ -953,6 +965,7 @@ public final class Phase2DatasetEvaluator {
                 fusionJson.put("depth_observation_count", depthObservationCount);
                 fusionJson.put("depth_observation_used_count", depthUsedCount);
                 fusionJson.put("depth_observation_excluded_metadata_count", depthExcludedMetadataCount);
+                fusionJson.put("depth_observation_excluded_quality_count", depthExcludedQualityCount);
                 fusionJson.put("raw_point_count", rawDepthPointCount);
                 fusionJson.put("confidence_rejected_count", confidenceRejectedCount);
                 fusionJson.put("range_rejected_count", rangeRejectedCount);

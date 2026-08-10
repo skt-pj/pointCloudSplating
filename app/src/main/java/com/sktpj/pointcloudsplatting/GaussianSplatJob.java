@@ -132,7 +132,7 @@ public final class GaussianSplatJob {
         Context appContext = context.getApplicationContext();
         if (!ModelProcessingCoordinator.enter(appContext)) {
             if (!exactCheckpointBeforeRun) deleteLegacyResumeHint(datasetDirectory);
-            return Result.fail("変換用画面を開始できなかったため、安全のため追加学習を開始しませんでした。",
+            return Result.fail("3Dモデルの追加学習は現在利用できません。保存済みモデルは変更されていません。",
                     frameCount);
         }
 
@@ -239,7 +239,7 @@ public final class GaussianSplatJob {
             notifyProgress(listener, 3, "変換中のカメラとAR表示を停止しています…");
             Context appContext = context.getApplicationContext();
             if (!ModelProcessingCoordinator.enter(appContext)) {
-                return Result.fail("変換用画面を開始できなかったため、安全のため3D処理を開始しませんでした。", count);
+                return Result.fail("3Dモデル作成機能は現在準備中です。撮影データは保存されています。", count);
             }
 
             NativeGaussianTrainer.Result trained;

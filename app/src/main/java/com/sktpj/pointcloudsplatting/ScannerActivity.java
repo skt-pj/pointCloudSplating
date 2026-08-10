@@ -415,9 +415,13 @@ public final class ScannerActivity extends Activity
         actionBar.addView(saveButton, saveParams);
 
         gaussianButton = new Button(this);
-        gaussianButton.setText("3Dモデルを作成");
-        styleButton(gaussianButton, 0xFF0B57D0, 15f);
-        gaussianButton.setContentDescription("撮影した写真から3Dモデルを作成する");
+        boolean phase3Enabled = ModelProcessingCoordinator.isPhase3ProcessingEnabled();
+        gaussianButton.setText(phase3Enabled ? "3Dモデルを作成" : "3Dモデル作成 準備中");
+        styleButton(gaussianButton, phase3Enabled ? 0xFF0B57D0 : 0xFF3C4043, 15f);
+        gaussianButton.setContentDescription(phase3Enabled
+                ? "撮影した写真から3Dモデルを作成する"
+                : "3Dモデル作成は現在準備中");
+        gaussianButton.setEnabled(phase3Enabled);
         gaussianButton.setOnClickListener(v -> startGaussianSplatting());
         LinearLayout.LayoutParams modelParams = new LinearLayout.LayoutParams(0, dp(56), 0.58f);
         modelParams.leftMargin = dp(6);
@@ -596,7 +600,7 @@ public final class ScannerActivity extends Activity
                     saveInProgress = false;
                     runGaussianAfterSave = false;
                     saveButton.setEnabled(true);
-                    gaussianButton.setEnabled(true);
+                    gaussianButton.setEnabled(ModelProcessingCoordinator.isPhase3ProcessingEnabled());
                     modeButton.setEnabled(true);
                     showState("保存できませんでした",
                             "写真の保存が終わるまで少し待って、もう一度「撮影を保存」を押してください。");
@@ -613,11 +617,11 @@ public final class ScannerActivity extends Activity
                     finalizedDatasetPath = result.directory.getAbsolutePath();
                     saveButton.setText("撮影済み");
                     saveButton.setEnabled(false);
-                    gaussianButton.setEnabled(true);
+                    gaussianButton.setEnabled(ModelProcessingCoordinator.isPhase3ProcessingEnabled());
                     modeButton.setEnabled(false);
                     captureCountView.setText("保存した写真 " + result.frameCount + "枚");
                     showState("撮影を保存しました",
-                            result.frameCount + "枚の写真を保存しました。3Dプレビューを作成できます。");
+                            result.frameCount + "枚の写真を保存しました。");
                     if (runGaussianAfterSave) {
                         runGaussianAfterSave = false;
                         startGaussianSplatting();
@@ -626,7 +630,7 @@ public final class ScannerActivity extends Activity
                     runGaussianAfterSave = false;
                     manager.resumeCapture();
                     saveButton.setEnabled(true);
-                    gaussianButton.setEnabled(true);
+                    gaussianButton.setEnabled(ModelProcessingCoordinator.isPhase3ProcessingEnabled());
                     modeButton.setEnabled(true);
                     showState("保存できませんでした",
                             "まだ保存できた写真がありません。対象の周りをゆっくり撮影してから、もう一度お試しください。");
@@ -636,6 +640,14 @@ public final class ScannerActivity extends Activity
     }
 
     private void startGaussianSplatting() {
+        if (!ModelProcessingCoordinator.isPhase3ProcessingEnabled()) {
+            runGaussianAfterSave = false;
+            showState("3Dモデル作成は準備中です",
+                    captureFinalized
+                            ? "撮影データは保存済みです。3Dモデル作成機能は現在準備中です。"
+                            : "撮影は続けられます。3Dモデル作成機能は現在準備中です。");
+            return;
+        }
         if (saveInProgress) {
             showFeedback("撮影の保存が終わるまで少しお待ちください");
             return;
@@ -674,7 +686,7 @@ public final class ScannerActivity extends Activity
                             showOperation("3Dプレビューを準備中", message, percent)));
             runOnUiThread(() -> {
                 processingModel = false;
-                gaussianButton.setEnabled(true);
+                gaussianButton.setEnabled(ModelProcessingCoordinator.isPhase3ProcessingEnabled());
                 if (result.success) {
                     lastModelError = "";
                     showOperation("高品質3Dモデルを作成しました",
