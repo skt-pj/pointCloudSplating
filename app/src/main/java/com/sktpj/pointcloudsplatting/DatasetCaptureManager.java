@@ -16,10 +16,7 @@ import android.util.Size;
 import com.google.ar.core.Camera;
 import com.google.ar.core.CameraIntrinsics;
 import com.google.ar.core.Frame;
-import com.google.ar.core.ImageMetadata;
 import com.google.ar.core.Pose;
-import com.google.ar.core.exceptions.MetadataNotFoundException;
-import com.google.ar.core.exceptions.NotYetAvailableException;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -48,9 +45,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Phase 1 observation recorder.
  *
- * <p>High-resolution Camera2 JPEGs are the RGB observations of record. Raw Depth observations are
- * saved independently in the dataset root coordinate system. A nearby depth observation may also
- * be emitted as a legacy frame_*.ply compatibility artifact, but RGB validity never depends on it.
+ * <p>Camera2 high-resolution JPEGs are the RGB observations of record. Raw Depth observations are
+ * saved independently in datasetRootAnchor coordinates. RGB validity never depends on a matching
+ * Depth frame; nearest-depth references and frame_*.ply are compatibility/diagnostic artifacts.
  */
 public final class DatasetCaptureManager {
     private static final String TAG = "DatasetCapture";
@@ -70,8 +67,8 @@ public final class DatasetCaptureManager {
     private static final int MAX_DEPTH_SAMPLES = 48;
     private static final int MAX_FALLBACK_DEPTH_PRIORS = 6;
 
-    // ScannerActivity applies the selected indoor/outdoor limit before issuing the request. These
-    // are the broad absolute save guards so an unexpectedly slow/noisy result is still rejected.
+    // ScannerActivity applies the selected indoor/outdoor limit before issuing a still. These are
+    // broad result-side guards so unexpectedly slow/noisy captures are still rejected.
     private static final long MAX_STILL_EXPOSURE_NS = 8_000_000L;
     private static final int MAX_STILL_ISO = 6400;
 
@@ -88,7 +85,7 @@ public final class DatasetCaptureManager {
     private long previousMotionTimestampNs = -1L;
     private Pose lastRequestedPose;
     private long lastRequestedTimestampNs = -1L;
-    private long lastSavedDepthTimestampNs = -1L;
+    private long lastSavedDepthThrottleTimestampNs = -1L;
     private boolean captureInFlight;
     private boolean cameraActive = true;
     private boolean fallbackDepthPriorsQueued;
@@ -120,7 +117,7 @@ public final class DatasetCaptureManager {
         return context.getExternalFilesDir(Environment.DIRECTORY_PICTURES);
     }
 
-    /** Prefer the largest binned-quality JPEG up to about 13 MP; do not couple it to ARCore size. */
+    /** Prefer a binned high-quality JPEG up to about 13 MP; do not couple it to ARCore size. */
     public static Size chooseJpegSize(CameraCharacteristics characteristics) {
         StreamConfigurationMap map = characteristics.get(
                 CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
@@ -151,13 +148,15 @@ public final class DatasetCaptureManager {
             String cameraId, Size jpegSize, CameraCharacteristics characteristics) {
         this.cameraId = cameraId;
         this.jpegSize = jpegSize;
+
         Rect active = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
         Rect pre = characteristics.get(
                 CameraCharacteristics.SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
         activeArray = active == null ? null : new Rect(active);
         preCorrectionActiveArray = pre == null ? null : new Rect(pre);
-        float[] intr = characteristics.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION);
-        lensIntrinsicCalibration = intr == null ? null : intr.clone();
+
+        float[] intrinsic = characteristics.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION);
+        lensIntrinsicCalibration = intrinsic == null ? null : intrinsic.clone();
         if (Build.VERSION.SDK_INT >= 28) {
             float[] distortion = characteristics.get(CameraCharacteristics.LENS_DISTORTION);
             lensDistortion = distortion == null ? null : distortion.clone();
@@ -224,21 +223,23 @@ public final class DatasetCaptureManager {
         onDepthFrame(depth, rootPose, -1L);
     }
 
-    /** Saves Raw Depth as an independent geometry observation, not as an RGB-frame requirement. */
+    /** Saves a new Raw Depth estimate as an independent geometry observation. */
     public synchronized void onDepthFrame(
             DepthData depth, Pose rootPose, long androidCameraTimestampNs) {
-        if (!cameraActive || depth == null || rootPose == null) {
+        if (!cameraActive || !captureEnabled || depth == null || rootPose == null) {
             return;
         }
         try {
             WorldPointCloudSnapshot snapshot = WorldPointCloudSnapshot.from(depth, rootPose);
             Pose rootFromDepthCamera = rootPose.inverse().compose(depth.getCameraPose());
-            long effectiveTimestamp = androidCameraTimestampNs > 0
-                    ? androidCameraTimestampNs : depth.getTimestamp();
 
-            if (lastSavedDepthTimestampNs > 0
-                    && effectiveTimestamp > lastSavedDepthTimestampNs
-                    && effectiveTimestamp - lastSavedDepthTimestampNs
+            // This is only a write-rate throttle. Cross-sensor correlation never compares the raw
+            // ARCore depth timestamp with Camera2 SENSOR_TIMESTAMP.
+            long throttleTimestamp = androidCameraTimestampNs > 0
+                    ? androidCameraTimestampNs : depth.getTimestamp();
+            if (lastSavedDepthThrottleTimestampNs > 0
+                    && throttleTimestamp > lastSavedDepthThrottleTimestampNs
+                    && throttleTimestamp - lastSavedDepthThrottleTimestampNs
                     < MIN_DEPTH_OBSERVATION_INTERVAL_NS) {
                 return;
             }
@@ -254,24 +255,22 @@ public final class DatasetCaptureManager {
             while (depthSamples.size() > MAX_DEPTH_SAMPLES) {
                 depthSamples.removeFirst();
             }
-            lastSavedDepthTimestampNs = effectiveTimestamp;
+            lastSavedDepthThrottleTimestampNs = throttleTimestamp;
             savedDepthCount = index;
 
-            if (captureEnabled) {
-                writer.execute(() -> {
-                    try {
-                        writeDepthObservation(observation);
-                    } catch (IOException | JSONException e) {
-                        DiagnosticLog.e(TAG, "Failed to write independent Raw Depth observation", e);
-                    }
-                });
-            }
+            writer.execute(() -> {
+                try {
+                    writeDepthObservation(observation);
+                } catch (IOException | JSONException e) {
+                    DiagnosticLog.e(TAG, "Failed to write independent Raw Depth observation", e);
+                }
+            });
         } catch (RuntimeException e) {
             DiagnosticLog.w(TAG, "Failed to snapshot Raw Depth: " + e.getMessage());
         }
     }
 
-    /** Records ARCore poses continuously and requests a high-resolution still when quality permits. */
+    /** Records ARCore poses and requests a high-resolution Camera2 still at a useful stable view. */
     public synchronized boolean onArFrame(Frame frame, Camera camera, Pose rootPose) {
         if (!cameraActive) {
             lastDecision = "camera paused";
@@ -280,10 +279,10 @@ public final class DatasetCaptureManager {
 
         long arFrameTimestampNs = frame.getTimestamp();
         long androidCameraTimestampNs = safeAndroidCameraTimestamp(frame);
-        long correlationTimestampNs = androidCameraTimestampNs > 0
+        long motionTimestampNs = androidCameraTimestampNs > 0
                 ? androidCameraTimestampNs : arFrameTimestampNs;
         Pose rootFromCamera = rootPose.inverse().compose(camera.getPose());
-        Motion motion = measureMotion(rootFromCamera, correlationTimestampNs);
+        Motion motion = measureMotion(rootFromCamera, motionTimestampNs);
 
         poseSamples.addLast(PoseSample.from(
                 androidCameraTimestampNs,
@@ -295,7 +294,7 @@ public final class DatasetCaptureManager {
         }
 
         previousPose = rootFromCamera;
-        previousMotionTimestampNs = correlationTimestampNs;
+        previousMotionTimestampNs = motionTimestampNs;
         tryFinalizePendingLocked();
 
         if (!captureEnabled) {
@@ -307,36 +306,29 @@ public final class DatasetCaptureManager {
             return false;
         }
         if (lastRequestedTimestampNs >= 0
-                && correlationTimestampNs - lastRequestedTimestampNs < MIN_CAPTURE_INTERVAL_NS) {
+                && motionTimestampNs > lastRequestedTimestampNs
+                && motionTimestampNs - lastRequestedTimestampNs < MIN_CAPTURE_INTERVAL_NS) {
             lastDecision = "waiting for next viewpoint";
             return false;
         }
-        if (!hasUsefulViewpointChange(rootFromCamera, correlationTimestampNs)) {
+        if (!hasUsefulViewpointChange(rootFromCamera, motionTimestampNs)) {
             lastDecision = "move to a new viewpoint";
             return false;
         }
-
-        ArFrameMetadata metadata = readArFrameMetadata(frame);
         if (motion.linearSpeedMps > MAX_LINEAR_SPEED_MPS
                 || motion.angularSpeedDps > MAX_ANGULAR_SPEED_DPS) {
             lastDecision = String.format(Locale.US,
                     "waiting for lower blur: %.2f m/s %.1f deg/s",
-                    motion.linearSpeedMps, motion.angularSpeedDps);
-            return false;
-        }
-        if (metadata.lensState != null
-                && metadata.lensState != CaptureResult.LENS_STATE_STATIONARY) {
-            lastDecision = "waiting for lens to stop";
-            return false;
-        }
-        if (!isFocusedState(metadata.afState)) {
-            lastDecision = "waiting for focus";
+                    motion.linearSpeedMps,
+                    motion.angularSpeedDps);
             return false;
         }
 
+        // Focus/exposure/lens-state gating is intentionally performed from Camera2 repeating
+        // results in ScannerActivity. Frame.getImageMetadata() is invalid in SharedCamera mode.
         captureInFlight = true;
         lastRequestedPose = rootFromCamera;
-        lastRequestedTimestampNs = correlationTimestampNs;
+        lastRequestedTimestampNs = motionTimestampNs;
         lastDecision = "requesting high-resolution photo";
         return true;
     }
@@ -372,6 +364,7 @@ public final class DatasetCaptureManager {
             byte[] jpeg = new byte[buffer.remaining()];
             buffer.get(jpeg);
             long timestamp = image.getTimestamp();
+
             synchronized (this) {
                 if (!cameraActive) {
                     return;
@@ -393,7 +386,7 @@ public final class DatasetCaptureManager {
         }
     }
 
-    /** Stops new capture requests and flushes Camera2/JPEG and independent Depth writes. */
+    /** Stops new observations and flushes in-flight RGB/Depth writes. */
     public boolean stopCaptureAndFlush(long timeoutMs) {
         long deadline = System.currentTimeMillis() + Math.max(1L, timeoutMs);
         synchronized (this) {
@@ -473,7 +466,8 @@ public final class DatasetCaptureManager {
         if (lastRequestedPose == null || lastRequestedTimestampNs < 0) {
             return true;
         }
-        if (timestampNs - lastRequestedTimestampNs >= FORCE_CAPTURE_AFTER_NS) {
+        if (timestampNs > lastRequestedTimestampNs
+                && timestampNs - lastRequestedTimestampNs >= FORCE_CAPTURE_AFTER_NS) {
             return true;
         }
         return translationDistance(lastRequestedPose, pose) >= MIN_VIEW_TRANSLATION_METERS
@@ -484,47 +478,58 @@ public final class DatasetCaptureManager {
         if (pendingJpegs.isEmpty() || poseSamples.isEmpty()) {
             return;
         }
-        PoseSample newest = poseSamples.peekLast();
-        long newestCameraTimestamp = newest == null ? -1L : newest.correlationTimestampNs();
 
+        long newestCameraTimestampNs = newestCorrelatedPoseTimestampLocked();
         Iterator<Map.Entry<Long, PendingJpeg>> iterator = pendingJpegs.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<Long, PendingJpeg> entry = iterator.next();
-            long imageTimestamp = entry.getKey();
-            StillMetadata metadata = stillMetadata.get(imageTimestamp);
+            long imageTimestampNs = entry.getKey();
+            StillMetadata metadata = stillMetadata.get(imageTimestampNs);
             if (metadata == null) {
                 continue;
             }
 
             if (!isStillSharpEnough(metadata)) {
                 iterator.remove();
-                stillMetadata.remove(imageTimestamp);
+                stillMetadata.remove(imageTimestampNs);
                 lastDecision = "discarded photo: exposure/focus quality gate";
                 DiagnosticLog.w(TAG,
-                        "Discarding high-resolution JPEG quality gate ts=" + imageTimestamp
-                                + " exp=" + metadata.exposureTimeNs + " iso=" + metadata.iso);
+                        "Discarding high-resolution JPEG quality gate ts=" + imageTimestampNs
+                                + " exp=" + metadata.exposureTimeNs
+                                + " iso=" + metadata.iso);
                 continue;
             }
 
-            ResolvedPose pose = resolvePoseLocked(imageTimestamp);
+            ResolvedPose pose = resolvePoseLocked(imageTimestampNs);
             if (pose == null) {
-                if (newestCameraTimestamp > 0
-                        && newestCameraTimestamp < imageTimestamp + MAX_POSE_MATCH_DELTA_NS) {
+                if (newestCameraTimestampNs <= 0) {
+                    if (poseSamples.size() < 10) {
+                        lastDecision = "waiting for Camera2-correlated ARCore timestamp";
+                        continue;
+                    }
+                    iterator.remove();
+                    stillMetadata.remove(imageTimestampNs);
+                    lastDecision = "discarded photo: ARCore Android camera timestamp unavailable";
+                    DiagnosticLog.w(TAG,
+                            "Discarding JPEG because ARCore Android camera timestamps are unavailable");
+                    continue;
+                }
+                if (newestCameraTimestampNs < imageTimestampNs + MAX_POSE_MATCH_DELTA_NS) {
                     lastDecision = "waiting for exposure-time pose";
                     continue;
                 }
                 iterator.remove();
-                stillMetadata.remove(imageTimestamp);
+                stillMetadata.remove(imageTimestampNs);
                 lastDecision = "discarded photo: no synchronized ARCore camera pose";
                 DiagnosticLog.w(TAG,
-                        "No Camera2-correlated ARCore pose for JPEG ts=" + imageTimestamp);
+                        "No Camera2-correlated ARCore pose for JPEG ts=" + imageTimestampNs);
                 continue;
             }
 
-            DepthObservation depthReference = findNearestDepthLocked(imageTimestamp);
+            DepthObservation depthReference = findNearestDepthLocked(imageTimestampNs);
             long depthDeltaNs = depthReference == null
                     ? Long.MAX_VALUE
-                    : depthReference.correlationTimestampNs() - imageTimestamp;
+                    : depthReference.androidCameraTimestampNs - imageTimestampNs;
             if (depthReference != null
                     && Math.abs(depthDeltaNs) > MAX_DEPTH_REFERENCE_DELTA_NS) {
                 depthReference = null;
@@ -532,7 +537,7 @@ public final class DatasetCaptureManager {
             }
 
             iterator.remove();
-            stillMetadata.remove(imageTimestamp);
+            stillMetadata.remove(imageTimestampNs);
             PendingJpeg jpeg = entry.getValue();
             int index = captureSequence.incrementAndGet();
             savedCount = index;
@@ -541,7 +546,13 @@ public final class DatasetCaptureManager {
             long finalDepthDeltaNs = depthDeltaNs;
             writer.execute(() -> {
                 try {
-                    writeCapture(index, jpeg, pose, metadata, finalDepthReference, finalDepthDeltaNs);
+                    writeCapture(
+                            index,
+                            jpeg,
+                            pose,
+                            metadata,
+                            finalDepthReference,
+                            finalDepthDeltaNs);
                 } catch (IOException | JSONException e) {
                     DiagnosticLog.e(TAG, "Failed to write RGB observation", e);
                 }
@@ -549,26 +560,38 @@ public final class DatasetCaptureManager {
         }
     }
 
+    private long newestCorrelatedPoseTimestampLocked() {
+        Iterator<PoseSample> iterator = poseSamples.descendingIterator();
+        while (iterator.hasNext()) {
+            long timestamp = iterator.next().correlationTimestampNs();
+            if (timestamp > 0) {
+                return timestamp;
+            }
+        }
+        return -1L;
+    }
+
+    /** Correlates Camera2 SENSOR_TIMESTAMP only with ARCore Android camera timestamps. */
     private ResolvedPose resolvePoseLocked(long sensorTimestampNs) {
         PoseSample before = null;
         PoseSample after = null;
         PoseSample nearest = null;
-        long nearestDelta = Long.MAX_VALUE;
+        long nearestAbsDelta = Long.MAX_VALUE;
 
         for (PoseSample sample : poseSamples) {
-            long ts = sample.correlationTimestampNs();
-            if (ts <= 0) {
+            long timestamp = sample.correlationTimestampNs();
+            if (timestamp <= 0) {
                 continue;
             }
-            long absDelta = Math.abs(ts - sensorTimestampNs);
-            if (absDelta < nearestDelta) {
+            long absDelta = Math.abs(timestamp - sensorTimestampNs);
+            if (absDelta < nearestAbsDelta) {
                 nearest = sample;
-                nearestDelta = absDelta;
+                nearestAbsDelta = absDelta;
             }
-            if (ts <= sensorTimestampNs) {
+            if (timestamp <= sensorTimestampNs) {
                 before = sample;
             }
-            if (ts >= sensorTimestampNs) {
+            if (timestamp >= sensorTimestampNs) {
                 after = sample;
                 break;
             }
@@ -579,8 +602,12 @@ public final class DatasetCaptureManager {
             long afterDelta = after.correlationTimestampNs() - sensorTimestampNs;
             if (beforeDelta <= MAX_POSE_MATCH_DELTA_NS
                     && afterDelta <= MAX_POSE_MATCH_DELTA_NS) {
-                if (before == after || before.correlationTimestampNs() == after.correlationTimestampNs()) {
-                    return ResolvedPose.fromSample(before, "exact_or_single_sample", sensorTimestampNs);
+                if (before == after
+                        || before.correlationTimestampNs() == after.correlationTimestampNs()) {
+                    return ResolvedPose.fromSample(
+                            before,
+                            "exact_or_single_sample",
+                            sensorTimestampNs);
                 }
                 float t = (float) ((double) beforeDelta
                         / (double) (after.correlationTimestampNs()
@@ -601,23 +628,26 @@ public final class DatasetCaptureManager {
             }
         }
 
-        if (nearest != null && nearestDelta <= MAX_POSE_MATCH_DELTA_NS) {
-            return ResolvedPose.fromSample(nearest, "nearest_sample_fallback", sensorTimestampNs);
+        if (nearest != null && nearestAbsDelta <= MAX_POSE_MATCH_DELTA_NS) {
+            return ResolvedPose.fromSample(
+                    nearest,
+                    "nearest_sample_fallback",
+                    sensorTimestampNs);
         }
         return null;
     }
 
+    /** Optional diagnostic/compatibility reference; never required for RGB validity. */
     private DepthObservation findNearestDepthLocked(long sensorTimestampNs) {
         DepthObservation best = null;
         long bestDelta = Long.MAX_VALUE;
-        for (DepthObservation sample : depthSamples) {
-            long ts = sample.correlationTimestampNs();
-            if (ts <= 0) {
+        for (DepthObservation observation : depthSamples) {
+            if (observation.androidCameraTimestampNs <= 0) {
                 continue;
             }
-            long delta = Math.abs(ts - sensorTimestampNs);
+            long delta = Math.abs(observation.androidCameraTimestampNs - sensorTimestampNs);
             if (delta < bestDelta) {
-                best = sample;
+                best = observation;
                 bestDelta = delta;
             }
         }
@@ -628,13 +658,18 @@ public final class DatasetCaptureManager {
         if (stillMetadata.size() <= 12) {
             return;
         }
-        PoseSample oldest = poseSamples.peekFirst();
-        long oldestCameraTimestamp = oldest == null ? Long.MIN_VALUE : oldest.correlationTimestampNs();
-        if (oldestCameraTimestamp <= 0) {
+        long oldestTimestampNs = -1L;
+        for (PoseSample sample : poseSamples) {
+            if (sample.correlationTimestampNs() > 0) {
+                oldestTimestampNs = sample.correlationTimestampNs();
+                break;
+            }
+        }
+        if (oldestTimestampNs <= 0) {
             return;
         }
-        stillMetadata.entrySet().removeIf(
-                e -> e.getKey() < oldestCameraTimestamp - MAX_POSE_MATCH_DELTA_NS);
+        long cutoff = oldestTimestampNs - MAX_POSE_MATCH_DELTA_NS;
+        stillMetadata.entrySet().removeIf(entry -> entry.getKey() < cutoff);
     }
 
     private void writeCapture(
@@ -703,32 +738,48 @@ public final class DatasetCaptureManager {
 
         if (pose.intrinsicsSample != null) {
             JSONObject imageIntrinsics = new JSONObject();
-            imageIntrinsics.put("focal_length_px", array(pose.intrinsicsSample.imageFocalLengthPx));
-            imageIntrinsics.put("principal_point_px", array(pose.intrinsicsSample.imagePrincipalPointPx));
-            imageIntrinsics.put("image_dimensions", array(pose.intrinsicsSample.imageDimensions));
+            imageIntrinsics.put(
+                    "focal_length_px",
+                    array(pose.intrinsicsSample.imageFocalLengthPx));
+            imageIntrinsics.put(
+                    "principal_point_px",
+                    array(pose.intrinsicsSample.imagePrincipalPointPx));
+            imageIntrinsics.put(
+                    "image_dimensions",
+                    array(pose.intrinsicsSample.imageDimensions));
             json.put("arcore_image_intrinsics", imageIntrinsics);
 
             JSONObject textureIntrinsics = new JSONObject();
-            textureIntrinsics.put("focal_length_px", array(pose.intrinsicsSample.textureFocalLengthPx));
-            textureIntrinsics.put("principal_point_px", array(pose.intrinsicsSample.texturePrincipalPointPx));
-            textureIntrinsics.put("image_dimensions", array(pose.intrinsicsSample.textureDimensions));
+            textureIntrinsics.put(
+                    "focal_length_px",
+                    array(pose.intrinsicsSample.textureFocalLengthPx));
+            textureIntrinsics.put(
+                    "principal_point_px",
+                    array(pose.intrinsicsSample.texturePrincipalPointPx));
+            textureIntrinsics.put(
+                    "image_dimensions",
+                    array(pose.intrinsicsSample.textureDimensions));
             json.put("arcore_texture_intrinsics", textureIntrinsics);
         }
 
         json.put("jpeg_intrinsics", jpegIntrinsics.toJson());
-        json.put("camera2_capture", metadata.toJson());
+        JSONObject cameraCapture = metadata.toJson();
+        cameraCapture.put("camera_id", cameraId);
+        json.put("camera2_capture", cameraCapture);
 
         if (depthReference != null) {
             json.put("nearest_depth_observation_id", depthReference.observationId());
             json.put("nearest_depth_observation_ply", depthReference.plyFileName());
-            json.put("nearest_depth_android_camera_timestamp_ns",
-                    depthReference.androidCameraTimestampNs > 0
-                            ? depthReference.androidCameraTimestampNs : JSONObject.NULL);
+            json.put(
+                    "nearest_depth_android_camera_timestamp_ns",
+                    depthReference.androidCameraTimestampNs);
             json.put("nearest_depth_raw_timestamp_ns", depthReference.depthTimestampNs);
             json.put("nearest_depth_timestamp_delta_ns", depthDeltaNs);
         } else {
             json.put("nearest_depth_observation_id", JSONObject.NULL);
             json.put("nearest_depth_observation_ply", JSONObject.NULL);
+            json.put("nearest_depth_android_camera_timestamp_ns", JSONObject.NULL);
+            json.put("nearest_depth_raw_timestamp_ns", JSONObject.NULL);
             json.put("nearest_depth_timestamp_delta_ns", JSONObject.NULL);
         }
 
@@ -761,8 +812,8 @@ public final class DatasetCaptureManager {
         File jsonFile = new File(captureRoot, observation.jsonFileName());
         observation.snapshot.writePly(plyFile);
 
-        float[] rootFromDepthCameraMatrix = new float[16];
-        observation.rootFromDepthCamera.toMatrix(rootFromDepthCameraMatrix, 0);
+        float[] rootFromDepthCamera = new float[16];
+        observation.rootFromDepthCamera.toMatrix(rootFromDepthCamera, 0);
 
         JSONObject json = new JSONObject();
         json.put("observation_type", "raw_depth");
@@ -771,15 +822,18 @@ public final class DatasetCaptureManager {
         json.put("depth_observation_id", observation.observationId());
         json.put("point_cloud", plyFile.getName());
         json.put("raw_depth_timestamp_ns", observation.depthTimestampNs);
-        json.put("android_camera_timestamp_ns",
+        json.put(
+                "android_camera_timestamp_ns",
                 observation.androidCameraTimestampNs > 0
                         ? observation.androidCameraTimestampNs : JSONObject.NULL);
         json.put("point_count", observation.snapshot.getPointCount());
         json.put("coordinate_system", "datasetRootAnchor local coordinates");
-        json.put("root_from_depth_camera_column_major", array(rootFromDepthCameraMatrix));
-        json.put("depth_camera_translation_m",
+        json.put("root_from_depth_camera_column_major", array(rootFromDepthCamera));
+        json.put(
+                "depth_camera_translation_m",
                 array(observation.rootFromDepthCamera.getTranslation()));
-        json.put("depth_camera_rotation_quaternion_xyzw",
+        json.put(
+                "depth_camera_rotation_quaternion_xyzw",
                 array(observation.rootFromDepthCamera.getRotationQuaternion()));
         json.put("rgb_pairing_required", false);
 
@@ -792,7 +846,10 @@ public final class DatasetCaptureManager {
     }
 
     private void appendTrajectory(
-            int index, String image, long imageTimestampNs, ResolvedPose pose)
+            int index,
+            String image,
+            long imageTimestampNs,
+            ResolvedPose pose)
             throws IOException {
         File file = new File(captureRoot, "camera_trajectory.csv");
         boolean writeHeader = !file.exists() || file.length() == 0;
@@ -801,8 +858,8 @@ public final class DatasetCaptureManager {
                 out.write(("index,image,image_timestamp_ns,pose_method,pose_delta_ns,"
                         + "tx,ty,tz,qx,qy,qz,qw\n").getBytes(StandardCharsets.UTF_8));
             }
-            float[] t = pose.rootFromCamera.getTranslation();
-            float[] q = pose.rootFromCamera.getRotationQuaternion();
+            float[] translation = pose.rootFromCamera.getTranslation();
+            float[] rotation = pose.rootFromCamera.getRotationQuaternion();
             String line = String.format(Locale.US,
                     "%d,%s,%d,%s,%d,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n",
                     index,
@@ -810,13 +867,20 @@ public final class DatasetCaptureManager {
                     imageTimestampNs,
                     pose.method,
                     pose.nearestDeltaNs,
-                    t[0], t[1], t[2], q[0], q[1], q[2], q[3]);
+                    translation[0],
+                    translation[1],
+                    translation[2],
+                    rotation[0],
+                    rotation[1],
+                    rotation[2],
+                    rotation[3]);
             out.write(line.getBytes(StandardCharsets.UTF_8));
         }
     }
 
     private JpegIntrinsics resolveJpegIntrinsics(
-            StillMetadata metadata, PoseSample fallbackSample) {
+            StillMetadata metadata,
+            PoseSample fallbackSample) {
         if (jpegSize != null
                 && lensIntrinsicCalibration != null
                 && lensIntrinsicCalibration.length >= 5
@@ -828,10 +892,12 @@ public final class DatasetCaptureManager {
                 double cy = lensIntrinsicCalibration[3];
                 double skew = lensIntrinsicCalibration[4];
 
-                // Camera2 calibration is defined in the pre-correction active-array coordinate
-                // system. Map it to active-array coordinates before applying the capture crop.
+                // Camera2 calibration is expressed in the pre-correction active-array coordinate
+                // system. Map to the active array before applying the still crop.
                 Rect pre = preCorrectionActiveArray;
-                if (pre != null && pre.width() > 0 && pre.height() > 0
+                if (pre != null
+                        && pre.width() > 0
+                        && pre.height() > 0
                         && (pre.left != activeArray.left
                         || pre.top != activeArray.top
                         || pre.width() != activeArray.width()
@@ -846,10 +912,14 @@ public final class DatasetCaptureManager {
                 }
 
                 Rect crop = metadata.cropRegion == null
-                        ? new Rect(activeArray) : new Rect(metadata.cropRegion);
+                        ? new Rect(activeArray)
+                        : new Rect(metadata.cropRegion);
                 Rect effectiveCrop = centerCropToAspect(
-                        crop, (double) jpegSize.getWidth() / jpegSize.getHeight());
-                if (effectiveCrop.width() > 0 && effectiveCrop.height() > 0) {
+                        crop,
+                        (double) jpegSize.getWidth() / jpegSize.getHeight());
+                if (effectiveCrop != null
+                        && effectiveCrop.width() > 0
+                        && effectiveCrop.height() > 0) {
                     double sx = (double) jpegSize.getWidth() / effectiveCrop.width();
                     double sy = (double) jpegSize.getHeight() / effectiveCrop.height();
                     double outFx = fx * sx;
@@ -857,8 +927,10 @@ public final class DatasetCaptureManager {
                     double outCx = (cx - effectiveCrop.left) * sx;
                     double outCy = (cy - effectiveCrop.top) * sy;
                     double outSkew = skew * sx;
-                    if (finitePositive(outFx) && finitePositive(outFy)
-                            && Double.isFinite(outCx) && Double.isFinite(outCy)) {
+                    if (finitePositive(outFx)
+                            && finitePositive(outFy)
+                            && Double.isFinite(outCx)
+                            && Double.isFinite(outCy)) {
                         return new JpegIntrinsics(
                                 outFx,
                                 outFy,
@@ -874,7 +946,8 @@ public final class DatasetCaptureManager {
             }
         }
 
-        if (jpegSize != null && fallbackSample != null
+        if (jpegSize != null
+                && fallbackSample != null
                 && fallbackSample.imageDimensions[0] > 0
                 && fallbackSample.imageDimensions[1] > 0) {
             double sx = (double) jpegSize.getWidth() / fallbackSample.imageDimensions[0];
@@ -928,7 +1001,7 @@ public final class DatasetCaptureManager {
         }
     }
 
-    private void writeSessionCameraInfo(CameraCharacteristics c) {
+    private void writeSessionCameraInfo(CameraCharacteristics characteristics) {
         JSONObject json = new JSONObject();
         try {
             json.put("manufacturer", Build.MANUFACTURER);
@@ -944,33 +1017,43 @@ public final class DatasetCaptureManager {
             putNullable(json, "sensor_orientation_degrees", sensorOrientationDegrees);
             putRect(json, "active_array", activeArray);
             putRect(json, "pre_correction_active_array", preCorrectionActiveArray);
-            putFloatArray(json, "available_apertures",
-                    c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES));
-            putFloatArray(json, "available_focal_lengths_mm",
-                    c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS));
+            putFloatArray(
+                    json,
+                    "available_apertures",
+                    characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES));
+            putFloatArray(
+                    json,
+                    "available_focal_lengths_mm",
+                    characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS));
             putFloatArray(json, "lens_intrinsic_calibration", lensIntrinsicCalibration);
             putFloatArray(json, "lens_distortion", lensDistortion);
             json.put("phase", "v1_phase1_observation_capture");
-            json.put("rgb_observation_policy",
+            json.put(
+                    "rgb_observation_policy",
                     "Camera2 high-resolution JPEG + exposure-time ARCore pose + JPEG camera model is the photometric observation of record");
-            json.put("depth_observation_policy",
-                    "Raw Depth is saved independently with its own timestamp/pose in datasetRootAnchor coordinates; RGB pairing is optional reference only");
-            json.put("arcore_cpu_image_policy",
+            json.put(
+                    "depth_observation_policy",
+                    "New Raw Depth estimates are saved independently in datasetRootAnchor coordinates; RGB pairing is optional reference only");
+            json.put(
+                    "arcore_cpu_image_policy",
                     "tracking/diagnostic/depth-color helper only; never 3DGS photometric ground truth");
-            json.put("pose_correlation_policy",
-                    "Camera2 SENSOR_TIMESTAMP correlated against ARCore Frame.getAndroidCameraTimestamp; interpolate bracketed poses when possible");
+            json.put(
+                    "pose_correlation_policy",
+                    "Camera2 SENSOR_TIMESTAMP is correlated only against ARCore Frame.getAndroidCameraTimestamp; bracketed poses are interpolated when possible");
             json.put("stabilization_policy", "EIS OFF; OIS OFF for saved stills");
             try (FileOutputStream out = new FileOutputStream(
                     new File(captureRoot, "session_camera.json"))) {
                 out.write(json.toString(2).getBytes(StandardCharsets.UTF_8));
             }
         } catch (IOException | JSONException e) {
-            DiagnosticLog.w(TAG, "Failed to write session camera metadata: " + e.getMessage());
+            DiagnosticLog.w(TAG,
+                    "Failed to write session camera metadata: " + e.getMessage());
         }
     }
 
     private static boolean isStillSharpEnough(StillMetadata metadata) {
-        if (metadata.exposureTimeNs == null || metadata.exposureTimeNs > MAX_STILL_EXPOSURE_NS) {
+        if (metadata.exposureTimeNs == null
+                || metadata.exposureTimeNs > MAX_STILL_EXPOSURE_NS) {
             return false;
         }
         if (metadata.iso == null || metadata.iso > MAX_STILL_ISO) {
@@ -1001,27 +1084,6 @@ public final class DatasetCaptureManager {
                 || afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED;
     }
 
-    private static ArFrameMetadata readArFrameMetadata(Frame frame) {
-        ArFrameMetadata out = new ArFrameMetadata();
-        try {
-            ImageMetadata metadata = frame.getImageMetadata();
-            Byte lens = getByte(metadata, ImageMetadata.LENS_STATE);
-            out.lensState = lens == null ? null : lens & 0xff;
-            Byte af = getByte(metadata, ImageMetadata.CONTROL_AF_STATE);
-            out.afState = af == null ? null : af & 0xff;
-        } catch (NotYetAvailableException ignored) {
-        }
-        return out;
-    }
-
-    private static Byte getByte(ImageMetadata metadata, int key) {
-        try {
-            return metadata.getByte(key);
-        } catch (MetadataNotFoundException | IllegalArgumentException e) {
-            return null;
-        }
-    }
-
     private static long safeAndroidCameraTimestamp(Frame frame) {
         try {
             long value = frame.getAndroidCameraTimestamp();
@@ -1032,8 +1094,11 @@ public final class DatasetCaptureManager {
     }
 
     private static Rect centerCropToAspect(Rect source, double targetAspect) {
-        if (source == null || source.width() <= 0 || source.height() <= 0
-                || !Double.isFinite(targetAspect) || targetAspect <= 0.0) {
+        if (source == null
+                || source.width() <= 0
+                || source.height() <= 0
+                || !Double.isFinite(targetAspect)
+                || targetAspect <= 0.0) {
             return source == null ? null : new Rect(source);
         }
         double sourceAspect = (double) source.width() / source.height();
@@ -1043,13 +1108,19 @@ public final class DatasetCaptureManager {
         if (sourceAspect > targetAspect) {
             int targetWidth = Math.max(1, (int) Math.round(source.height() * targetAspect));
             int inset = Math.max(0, (source.width() - targetWidth) / 2);
-            return new Rect(source.left + inset, source.top,
-                    source.right - inset, source.bottom);
+            return new Rect(
+                    source.left + inset,
+                    source.top,
+                    source.right - inset,
+                    source.bottom);
         }
         int targetHeight = Math.max(1, (int) Math.round(source.width() / targetAspect));
         int inset = Math.max(0, (source.height() - targetHeight) / 2);
-        return new Rect(source.left, source.top + inset,
-                source.right, source.bottom - inset);
+        return new Rect(
+                source.left,
+                source.top + inset,
+                source.right,
+                source.bottom - inset);
     }
 
     private static long pixelCount(Size size) {
@@ -1108,7 +1179,8 @@ public final class DatasetCaptureManager {
         object.put(key, values == null ? JSONObject.NULL : array(values));
     }
 
-    private static void putRect(JSONObject object, String key, Rect rect) throws JSONException {
+    private static void putRect(JSONObject object, String key, Rect rect)
+            throws JSONException {
         if (rect == null) {
             object.put(key, JSONObject.NULL);
             return;
@@ -1129,11 +1201,6 @@ public final class DatasetCaptureManager {
             this.linearSpeedMps = linearSpeedMps;
             this.angularSpeedDps = angularSpeedDps;
         }
-    }
-
-    private static final class ArFrameMetadata {
-        Integer lensState;
-        Integer afState;
     }
 
     private static final class PendingJpeg {
@@ -1179,7 +1246,7 @@ public final class DatasetCaptureManager {
         }
 
         long correlationTimestampNs() {
-            return androidCameraTimestampNs > 0 ? androidCameraTimestampNs : arFrameTimestampNs;
+            return androidCameraTimestampNs > 0 ? androidCameraTimestampNs : -1L;
         }
 
         static PoseSample from(
@@ -1230,7 +1297,9 @@ public final class DatasetCaptureManager {
         }
 
         static ResolvedPose fromSample(
-                PoseSample sample, String method, long targetTimestampNs) {
+                PoseSample sample,
+                String method,
+                long targetTimestampNs) {
             return new ResolvedPose(
                     sample.rootFromCamera,
                     sample,
@@ -1251,7 +1320,8 @@ public final class DatasetCaptureManager {
             long beforeDelta = before.correlationTimestampNs() - targetTimestampNs;
             long afterDelta = after.correlationTimestampNs() - targetTimestampNs;
             long nearestDelta = Math.abs(beforeDelta) <= Math.abs(afterDelta)
-                    ? beforeDelta : afterDelta;
+                    ? beforeDelta
+                    : afterDelta;
             return new ResolvedPose(
                     pose,
                     intrinsicsSample,
@@ -1283,17 +1353,16 @@ public final class DatasetCaptureManager {
             this.snapshot = snapshot;
         }
 
-        long correlationTimestampNs() {
-            return androidCameraTimestampNs > 0 ? androidCameraTimestampNs : depthTimestampNs;
-        }
-
         String observationId() {
             return String.format(Locale.US, "depth_%06d", index);
         }
 
         String baseName() {
-            return String.format(Locale.US,
-                    "depth_obs_%06d_%d", index, depthTimestampNs);
+            return String.format(
+                    Locale.US,
+                    "depth_obs_%06d_%d",
+                    index,
+                    depthTimestampNs);
         }
 
         String plyFileName() {
@@ -1367,7 +1436,7 @@ public final class DatasetCaptureManager {
         final Integer jpegOrientationDegrees;
         final String activePhysicalCameraId;
 
-        StillMetadata(TotalCaptureResult result) {
+        private StillMetadata(TotalCaptureResult result) {
             exposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
             iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
             aperture = result.get(CaptureResult.LENS_APERTURE);
@@ -1399,7 +1468,6 @@ public final class DatasetCaptureManager {
 
         JSONObject toJson() throws JSONException {
             JSONObject json = new JSONObject();
-            putNullable(json, "camera_id", null);
             putNullable(json, "active_physical_camera_id", activePhysicalCameraId);
             putNullable(json, "exposure_time_ns", exposureTimeNs);
             putNullable(json, "iso", iso);
