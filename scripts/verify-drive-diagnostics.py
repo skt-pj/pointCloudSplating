@@ -74,8 +74,8 @@ def main() -> None:
     forbid(library, "pointCloudSplating-diagnostics-",
             "timestamped diagnostic copies must not be created")
 
-    require(version, "VERSION_NAME=1.0.5", "versionName must identify Phase 2 build")
-    require(version, "VERSION_CODE=42", "versionCode must identify Phase 2 build")
+    require(version, "VERSION_NAME=1.0.6", "versionName must identify Phase 2 fix build")
+    require(version, "VERSION_CODE=43", "versionCode must identify Phase 2 fix build")
 
     print("Drive diagnostics overwrite checks passed")
 
