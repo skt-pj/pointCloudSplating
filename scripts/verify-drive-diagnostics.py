@@ -41,8 +41,6 @@ def main() -> None:
     require(store, "AUTO_SYNC_DELAY_SECONDS", "automatic remote refresh is missing")
     forbid(store, 'openOutputStream(uri, "wa")', "append mode is forbidden")
 
-    # v1.0.4 incorrectly let capture_tmp hide a finalized evaluation. A persisted older primary
-    # also must not hide a newly finalized PASS or FAIL dataset in later builds.
     require(store, 'PREF_PRIMARY_DATASET_PATH = "primary_dataset_path"',
             "finalized dataset identity is not persisted")
     require(store, "public static void setPrimaryDataset(File dataset)",
@@ -74,8 +72,8 @@ def main() -> None:
     forbid(library, "pointCloudSplating-diagnostics-",
             "timestamped diagnostic copies must not be created")
 
-    require(version, "VERSION_NAME=1.0.6", "versionName must identify Phase 2 fix build")
-    require(version, "VERSION_CODE=43", "versionCode must identify Phase 2 fix build")
+    require(version, "VERSION_NAME=1.0.7", "versionName must identify Phase 2/UI fix build")
+    require(version, "VERSION_CODE=44", "versionCode must identify Phase 2/UI fix build")
 
     print("Drive diagnostics overwrite checks passed")
 
