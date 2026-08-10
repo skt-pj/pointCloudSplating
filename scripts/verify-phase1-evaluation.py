@@ -19,6 +19,24 @@ def forbid(text: str, needle: str, why: str) -> None:
         raise SystemExit(f"phase1 evaluation check failed: {why}: found {needle!r}")
 
 
+def parse_version_properties(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        if "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def semver_tuple(value: str) -> tuple[int, int, int]:
+    try:
+        major, minor, patch = value.split(".", 2)
+        return int(major), int(minor), int(patch)
+    except Exception as error:
+        raise SystemExit(f"phase1 evaluation check failed: invalid VERSION_NAME={value!r}") from error
+
+
 def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     finalizer = FINALIZER.read_text(encoding="utf-8")
@@ -61,8 +79,19 @@ def main() -> None:
     require(job, "Downstream 3D processing blocked: PHASE1_EVAL is not PASS",
             "blocked downstream processing is not diagnosable")
 
-    require(version, "VERSION_NAME=1.0.3", "versionName must identify Phase 1 evaluator build")
-    require(version, "VERSION_CODE=40", "versionCode must identify Phase 1 evaluator build")
+    # This contract first shipped in v1.0.3. Later builds must retain it; do not pin the checker to
+    # exactly v1.0.3 or every unrelated follow-up build would fail despite preserving the gate.
+    properties = parse_version_properties(version)
+    version_name = properties.get("VERSION_NAME", "")
+    try:
+        version_code = int(properties.get("VERSION_CODE", "0"))
+    except ValueError as error:
+        raise SystemExit("phase1 evaluation check failed: VERSION_CODE is not an integer") from error
+    if semver_tuple(version_name) < (1, 0, 3) or version_code < 40:
+        raise SystemExit(
+            "phase1 evaluation check failed: build predates Phase 1 evaluator "
+            f"VERSION_NAME={version_name} VERSION_CODE={version_code}"
+        )
 
     print("Phase 1 evaluation architecture checks passed")
 
