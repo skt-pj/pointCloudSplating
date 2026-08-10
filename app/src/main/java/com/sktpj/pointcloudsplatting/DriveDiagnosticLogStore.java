@@ -16,6 +16,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.Executors;
@@ -24,11 +26,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Persists the latest diagnostic report into one user-selected Storage Access Framework document.
+ * Replaces one user-selected Drive/SAF diagnostics document with the latest report.
  *
- * <p>The intended destination is Google Drive. The app never appends to the remote document and
- * never creates timestamped copies after setup. Every sync opens the same persisted document URI
- * in truncate mode ("wt") and replaces its contents with the latest current-process diagnostics.
+ * <p>The remote document is never appended. The dataset section prefers an explicitly selected
+ * finalized dataset, then the newest finalized {@code dataset_*} carrying {@code .saved}. A newer
+ * {@code capture_tmp_*} must never displace a completed dataset's Phase evaluation report.
  */
 public final class DriveDiagnosticLogStore {
     public static final String FILE_NAME = "pointCloudSplating-current-diagnostics.txt";
@@ -36,6 +38,7 @@ public final class DriveDiagnosticLogStore {
     private static final String TAG = "DriveDiagnosticLog";
     private static final String PREFS_NAME = "drive-diagnostic-log";
     private static final String PREF_DOCUMENT_URI = "document_uri";
+    private static final String PREF_PRIMARY_DATASET_PATH = "primary_dataset_path";
     private static final long AUTO_SYNC_DELAY_SECONDS = 3L;
     private static final int MAX_AUXILIARY_FILE_BYTES = 512_000;
     private static final String[] AUXILIARY_FILES = {
@@ -69,7 +72,6 @@ public final class DriveDiagnosticLogStore {
         appContext = context.getApplicationContext();
     }
 
-    /** Fixed-name document creation intent. The selected URI is persisted after the first setup. */
     public static Intent createDestinationIntent() {
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -86,9 +88,6 @@ public final class DriveDiagnosticLogStore {
         return value != null && !readStoredUri(value).isEmpty();
     }
 
-    /**
-     * Stores a URI returned from ACTION_CREATE_DOCUMENT and retains write permission across restarts.
-     */
     public static boolean registerDestination(Context context, Intent resultData) {
         if (context == null || resultData == null || resultData.getData() == null) return false;
         Context value = context.getApplicationContext();
@@ -107,7 +106,16 @@ public final class DriveDiagnosticLogStore {
         }
     }
 
-    /** Queue a low-frequency overwrite. Safe to call after every DiagnosticLog line. */
+    /** Makes a finalized dataset the source-of-truth for the Drive report. */
+    public static void setPrimaryDataset(File dataset) {
+        Context context = appContext;
+        if (context == null || !isFinalizedDataset(dataset)) return;
+        preferences(context)
+                .edit()
+                .putString(PREF_PRIMARY_DATASET_PATH, dataset.getAbsolutePath())
+                .apply();
+    }
+
     public static void requestOverwrite() {
         Context context = appContext;
         if (context == null || !hasDestination(context)) return;
@@ -118,7 +126,6 @@ public final class DriveDiagnosticLogStore {
         }, AUTO_SYNC_DELAY_SECONDS, TimeUnit.SECONDS);
     }
 
-    /** Force an overwrite now, e.g. when the user taps Drive log update in the library. */
     public static void overwriteNow(Completion completion) {
         Context context = appContext;
         if (context == null) {
@@ -134,6 +141,7 @@ public final class DriveDiagnosticLogStore {
     private static WriteResult overwriteInternal(Context context) {
         String stored = readStoredUri(context);
         if (stored.isEmpty()) return WriteResult.fail("Driveログの保存先が未設定です");
+
         Uri uri;
         try {
             uri = Uri.parse(stored);
@@ -168,6 +176,10 @@ public final class DriveDiagnosticLogStore {
 
     private static String buildReport(Context context) {
         File dataset = findLatestDataset(context);
+        String datasetState = dataset == null
+                ? "unavailable"
+                : (isFinalizedDataset(dataset) ? "finalized" : "temporary_fallback");
+
         StringBuilder out = new StringBuilder();
         out.append("pointCloudSplating Drive diagnostics\n")
                 .append("version=").append(BuildConfig.VERSION_NAME).append('\n')
@@ -179,6 +191,8 @@ public final class DriveDiagnosticLogStore {
                 .append("driveFile=").append(FILE_NAME).append('\n')
                 .append("driveWriteMode=truncate_replace_not_append\n")
                 .append("logScope=current_process_only\n")
+                .append("datasetSelection=last_finalized_preferred\n")
+                .append("datasetState=").append(datasetState).append('\n')
                 .append("dataset=").append(dataset == null ? "unavailable" : dataset.getAbsolutePath())
                 .append("\n\n=== current process log ===\n")
                 .append(DiagnosticLog.currentProcessSnapshot());
@@ -198,23 +212,46 @@ public final class DriveDiagnosticLogStore {
         return out.toString();
     }
 
+    /**
+     * Primary selection policy:
+     * 1. Persisted finalized dataset selected by evaluator/finalizer.
+     * 2. Newest finalized dataset_* with .saved.
+     * 3. Only when no finalized dataset exists, newest capture_tmp_* as a diagnostic fallback.
+     */
     private static File findLatestDataset(Context context) {
+        String preferredPath = preferences(context).getString(PREF_PRIMARY_DATASET_PATH, "");
+        if (!preferredPath.isEmpty()) {
+            File preferred = new File(preferredPath);
+            if (isFinalizedDataset(preferred)) return preferred;
+            preferences(context).edit().remove(PREF_PRIMARY_DATASET_PATH).apply();
+        }
+
         File pictures = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES);
         if (pictures == null || !pictures.isDirectory()) return null;
-        File[] directories = pictures.listFiles(file -> file.isDirectory()
-                && (file.getName().startsWith("dataset_")
-                || file.getName().startsWith("capture_tmp_")));
-        if (directories == null || directories.length == 0) return null;
-        File newest = null;
-        long newestModified = Long.MIN_VALUE;
-        for (File directory : directories) {
-            long modified = directory.lastModified();
-            if (newest == null || modified > newestModified) {
-                newest = directory;
-                newestModified = modified;
-            }
+
+        File[] finalized = pictures.listFiles(DriveDiagnosticLogStore::isFinalizedDataset);
+        if (finalized != null && finalized.length > 0) {
+            Arrays.sort(finalized, Comparator.comparingLong(File::lastModified).reversed());
+            File newest = finalized[0];
+            preferences(context)
+                    .edit()
+                    .putString(PREF_PRIMARY_DATASET_PATH, newest.getAbsolutePath())
+                    .apply();
+            return newest;
         }
-        return newest;
+
+        File[] temporary = pictures.listFiles(file ->
+                file.isDirectory() && file.getName().startsWith("capture_tmp_"));
+        if (temporary == null || temporary.length == 0) return null;
+        Arrays.sort(temporary, Comparator.comparingLong(File::lastModified).reversed());
+        return temporary[0];
+    }
+
+    private static boolean isFinalizedDataset(File file) {
+        return file != null
+                && file.isDirectory()
+                && file.getName().startsWith("dataset_")
+                && new File(file, ".saved").isFile();
     }
 
     private static String readUtf8Bounded(File file, int maxBytes) throws IOException {

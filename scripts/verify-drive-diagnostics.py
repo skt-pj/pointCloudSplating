@@ -34,12 +34,24 @@ def main() -> None:
     require(store, 'openOutputStream(uri, "wt")',
             "Drive write must explicitly truncate instead of append")
     require(store, "DiagnosticLog.currentProcessSnapshot()",
-            "remote report must exclude historical process logs")
+            "current-process diagnostic log missing")
     require(store, '"phase1_evaluation.json"', "Phase 1 evaluation is not exported")
-    require(store, '"phase2_evaluation.json"', "Phase 2 evaluation slot is not exported")
+    require(store, '"phase2_evaluation.json"', "Phase 2 evaluation is not exported")
     require(store, '"phase3_evaluation.json"', "Phase 3 evaluation slot is not exported")
     require(store, "AUTO_SYNC_DELAY_SECONDS", "automatic remote refresh is missing")
     forbid(store, 'openOutputStream(uri, "wa")', "append mode is forbidden")
+
+    # v1.0.4 incorrectly let a newer capture_tmp directory hide the last finalized dataset.
+    require(store, 'PREF_PRIMARY_DATASET_PATH = "primary_dataset_path"',
+            "finalized dataset identity is not persisted")
+    require(store, "public static void setPrimaryDataset(File dataset)",
+            "evaluators cannot select the finalized diagnostic dataset")
+    require(store, "datasetSelection=last_finalized_preferred",
+            "report does not expose finalized-first selection policy")
+    require(store, 'file.getName().startsWith("dataset_")',
+            "finalized dataset selection missing")
+    require(store, 'new File(file, ".saved").isFile()',
+            "finalized dataset marker is not required")
 
     require(log, "public static synchronized String currentProcessSnapshot()",
             "current-process log view missing")
@@ -55,8 +67,8 @@ def main() -> None:
     forbid(library, "pointCloudSplating-diagnostics-",
             "timestamped diagnostic copies must not be created")
 
-    require(version, "VERSION_NAME=1.0.4", "versionName must identify Drive logging build")
-    require(version, "VERSION_CODE=41", "versionCode must identify Drive logging build")
+    require(version, "VERSION_NAME=1.0.5", "versionName must identify Phase 2 build")
+    require(version, "VERSION_CODE=42", "versionCode must identify Phase 2 build")
 
     print("Drive diagnostics overwrite checks passed")
 

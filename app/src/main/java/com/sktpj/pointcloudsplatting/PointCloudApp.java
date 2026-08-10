@@ -13,6 +13,7 @@ public final class PointCloudApp extends Application {
         appContext = getApplicationContext();
         DriveDiagnosticLogStore.initialize(appContext);
         DiagnosticLog.initialize(appContext);
+        Phase2EvaluationCoordinator.initialize(appContext);
         DriveDiagnosticLogStore.requestOverwrite();
 
         Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();

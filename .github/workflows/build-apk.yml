@@ -50,6 +50,9 @@ jobs:
       - name: Verify Phase 1 observation evaluation
         run: python3 scripts/verify-phase1-evaluation.py
 
+      - name: Verify Phase 2 geometry and camera-view evaluation
+        run: python3 scripts/verify-phase2-evaluation.py
+
       - name: Verify mobile trainer architecture
         run: python3 scripts/verify-mobile-trainer.py
 
