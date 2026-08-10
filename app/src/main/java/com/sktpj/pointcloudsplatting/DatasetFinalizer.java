@@ -117,6 +117,17 @@ public final class DatasetFinalizer {
                     "Per-observation jpeg_intrinsics from Camera2 physical calibration/crop, then legacy Camera2 mapping, then ARCore scaled fallback.");
             writeJson(new File(workingDirectory, "dataset_manifest.json"), manifest);
 
+            // Phase 1 is not complete merely because files were written. Evaluate every observation
+            // before marking the dataset as the input boundary for later phases. A failed evaluation
+            // is still preserved as a saved dataset for diagnosis, but Phase 2 must refuse it.
+            Phase1DatasetEvaluator.Result evaluation = Phase1DatasetEvaluator.evaluate(workingDirectory);
+            manifest.put("phase1_evaluation", "phase1_evaluation.json");
+            manifest.put("phase1_evaluation_status", evaluation.passed ? "PASS" : "FAIL");
+            manifest.put("phase1_evaluation_failure_count", evaluation.failureCount);
+            manifest.put("phase1_evaluation_warning_count", evaluation.warningCount);
+            manifest.put("phase1_evaluation_required_for_phase2", true);
+            writeJson(new File(workingDirectory, "dataset_manifest.json"), manifest);
+
             try (FileOutputStream out = new FileOutputStream(
                     new File(workingDirectory, ".saved"))) {
                 out.write("saved\n".getBytes(StandardCharsets.UTF_8));
@@ -127,7 +138,10 @@ public final class DatasetFinalizer {
                     "Finalized Phase1 RGB=" + sourceFrames.size()
                             + " independentDepth=" + independentDepthObservations
                             + " compatibilityDepth=" + compatibilityDepthFrames
-                            + " camera2Intrinsics=" + camera2CalibratedFrames);
+                            + " camera2Intrinsics=" + camera2CalibratedFrames
+                            + " phase1Eval=" + (evaluation.passed ? "PASS" : "FAIL")
+                            + " failures=" + evaluation.failureCount
+                            + " warnings=" + evaluation.warningCount);
             File finalDirectory = renameAsSavedDataset(workingDirectory);
             return Result.ok(finalDirectory, sourceFrames.size());
         } catch (IOException | JSONException | RuntimeException e) {
