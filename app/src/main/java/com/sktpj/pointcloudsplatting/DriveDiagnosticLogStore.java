@@ -28,9 +28,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Replaces one user-selected Drive/SAF diagnostics document with the latest report.
  *
- * <p>The remote document is never appended. The dataset section prefers an explicitly selected
- * finalized dataset, then the newest finalized {@code dataset_*} carrying {@code .saved}. A newer
- * {@code capture_tmp_*} must never displace a completed dataset's Phase evaluation report.
+ * <p>The remote document is never appended. The dataset section always prefers the newest
+ * finalized {@code dataset_*} carrying {@code .saved}. A newer {@code capture_tmp_*} must never
+ * displace a completed dataset's Phase evaluation report, and an older persisted primary dataset
+ * must never hide a newly finalized PASS or FAIL dataset.
  */
 public final class DriveDiagnosticLogStore {
     public static final String FILE_NAME = "pointCloudSplating-current-diagnostics.txt";
@@ -106,7 +107,7 @@ public final class DriveDiagnosticLogStore {
         }
     }
 
-    /** Makes a finalized dataset the source-of-truth for the Drive report. */
+    /** Records the finalized dataset currently being evaluated. Newer finalized datasets still win. */
     public static void setPrimaryDataset(File dataset) {
         Context context = appContext;
         if (context == null || !isFinalizedDataset(dataset)) return;
@@ -213,26 +214,38 @@ public final class DriveDiagnosticLogStore {
     }
 
     /**
-     * Primary selection policy:
-     * 1. Persisted finalized dataset selected by evaluator/finalizer.
-     * 2. Newest finalized dataset_* with .saved.
-     * 3. Only when no finalized dataset exists, newest capture_tmp_* as a diagnostic fallback.
+     * Selection policy:
+     * 1. Find the newest finalized dataset_* + .saved by its timestamped directory name.
+     * 2. A persisted primary path may identify that same/newer finalized dataset, but an older one
+     *    can never hide a newly finalized PASS or FAIL dataset.
+     * 3. Only when no finalized dataset exists, use newest capture_tmp_* as a diagnostic fallback.
      */
     private static File findLatestDataset(Context context) {
         String preferredPath = preferences(context).getString(PREF_PRIMARY_DATASET_PATH, "");
-        if (!preferredPath.isEmpty()) {
-            File preferred = new File(preferredPath);
-            if (isFinalizedDataset(preferred)) return preferred;
+        File preferred = preferredPath.isEmpty() ? null : new File(preferredPath);
+        if (preferred != null && !isFinalizedDataset(preferred)) {
             preferences(context).edit().remove(PREF_PRIMARY_DATASET_PATH).apply();
+            preferred = null;
         }
 
         File pictures = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES);
-        if (pictures == null || !pictures.isDirectory()) return null;
+        if (pictures == null || !pictures.isDirectory()) {
+            return preferred;
+        }
 
         File[] finalized = pictures.listFiles(DriveDiagnosticLogStore::isFinalizedDataset);
+        File newest = null;
         if (finalized != null && finalized.length > 0) {
-            Arrays.sort(finalized, Comparator.comparingLong(File::lastModified).reversed());
-            File newest = finalized[0];
+            Arrays.sort(finalized, Comparator.comparing(File::getName).reversed());
+            newest = finalized[0];
+        }
+
+        if (preferred != null
+                && (newest == null || preferred.getName().compareTo(newest.getName()) >= 0)) {
+            newest = preferred;
+        }
+
+        if (newest != null) {
             preferences(context)
                     .edit()
                     .putString(PREF_PRIMARY_DATASET_PATH, newest.getAbsolutePath())
@@ -243,7 +256,7 @@ public final class DriveDiagnosticLogStore {
         File[] temporary = pictures.listFiles(file ->
                 file.isDirectory() && file.getName().startsWith("capture_tmp_"));
         if (temporary == null || temporary.length == 0) return null;
-        Arrays.sort(temporary, Comparator.comparingLong(File::lastModified).reversed());
+        Arrays.sort(temporary, Comparator.comparing(File::getName).reversed());
         return temporary[0];
     }
 
