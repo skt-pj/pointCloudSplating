@@ -11,10 +11,9 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 
-/** Selects a 30 fps SharedCamera config for continuous ARCore CPU-image keyframe capture. */
+/** Selects a stream-safe 30 fps SharedCamera config while preserving headroom for high-resolution JPEG stills. */
 public final class CameraConfigSelector {
     private static final String TAG = "CameraConfigSelector";
-    private static final long MAX_CONTINUOUS_CPU_PIXELS = 2_500_000L;
 
     private CameraConfigSelector() {}
 
@@ -32,28 +31,33 @@ public final class CameraConfigSelector {
             return current;
         }
 
+        // Keep the physical camera ARCore selected by default. Switching camera IDs would make the
+        // saved Camera2 calibration and the ARCore tracking/depth camera refer to different lenses.
         List<CameraConfig> sameCamera = new ArrayList<>();
         for (CameraConfig config : configs) {
-            if (currentCameraId.equals(config.getCameraId())) sameCamera.add(config);
+            if (currentCameraId.equals(config.getCameraId())) {
+                sameCamera.add(config);
+            }
         }
         List<CameraConfig> candidates = sameCamera.isEmpty() ? configs : sameCamera;
 
-        // The scanner no longer inserts high-resolution Camera2 still captures. Prefer the largest
-        // ARCore CPU image that remains in a phone-friendly continuous 30 fps budget, because this
-        // exact YUV frame is what DatasetCaptureManager ranks and saves without interrupting preview.
+        // High-resolution Camera2 JPEG is the RGB observation of record. ARCore's CPU stream is
+        // therefore kept at the lowest supported load; among equally light CPU configs, retain the
+        // largest GPU preview. This is intentionally independent of JPEG aspect ratio/resolution.
+        long minCpuPixels = candidates.stream()
+                .mapToLong(CameraConfigSelector::cpuPixelCount)
+                .min()
+                .orElse(cpuPixelCount(current));
+
         CameraConfig best = candidates.stream()
-                .filter(config -> cpuPixelCount(config) <= MAX_CONTINUOUS_CPU_PIXELS)
-                .max(Comparator
-                        .comparingLong(CameraConfigSelector::cpuPixelCount)
-                        .thenComparingLong(CameraConfigSelector::gpuPixelCount))
-                .orElseGet(() -> candidates.stream()
-                        .min(Comparator.comparingLong(CameraConfigSelector::cpuPixelCount))
-                        .orElse(current));
+                .filter(config -> cpuPixelCount(config) == minCpuPixels)
+                .max(Comparator.comparingLong(CameraConfigSelector::gpuPixelCount))
+                .orElse(current);
 
         Size cpu = best.getImageSize();
         Size gpu = best.getTextureSize();
         DiagnosticLog.i(TAG,
-                "Selected continuous-capture SharedCamera config CPU="
+                "Selected stream-safe SharedCamera config CPU="
                         + cpu.getWidth() + "x" + cpu.getHeight()
                         + " GPU=" + gpu.getWidth() + "x" + gpu.getHeight()
                         + " cameraId=" + best.getCameraId()
