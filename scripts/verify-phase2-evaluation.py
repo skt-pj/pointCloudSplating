@@ -20,6 +20,24 @@ def forbid(text: str, needle: str, why: str) -> None:
         raise SystemExit(f"phase2 evaluation check failed: {why}: found {needle!r}")
 
 
+def parse_version_properties(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        if "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def semver_tuple(value: str) -> tuple[int, int, int]:
+    try:
+        major, minor, patch = value.split(".", 2)
+        return int(major), int(minor), int(patch)
+    except Exception as error:
+        raise SystemExit(f"phase2 evaluation check failed: invalid VERSION_NAME={value!r}") from error
+
+
 def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     coordinator = COORDINATOR.read_text(encoding="utf-8")
@@ -27,7 +45,6 @@ def main() -> None:
     app = APP.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
 
-    # Phase 2 consumes observations and evaluates geometry/camera consistency only.
     forbid(evaluator, "NativeGaussianTrainer", "Phase 2 must not start the Phase 3 trainer")
     forbid(evaluator, "GaussianSplatJob", "Phase 2 must not invoke the 3DGS job")
     forbid(evaluator, "ColmapDatasetExporter", "Phase 2 geometry must use independent depth_obs truth")
@@ -62,7 +79,8 @@ def main() -> None:
     require(evaluator, '"phase2_overlay_%02d_view_%03d.jpg"', "overlay artifact output missing")
     require(evaluator, '"depth_edge_alignment_error_px"', "edge alignment metric missing")
 
-    # Pixel 10a baseline review must not invent an edge threshold just to produce PASS.
+    # The Pixel 10a evidence review is intentionally separate from the fixed geometry gates.
+    # No edge threshold may be invented merely to turn REVIEW_REQUIRED into PASS.
     require(evaluator, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = null",
             "baseline edge threshold must remain intentionally unset")
     require(evaluator, '"REVIEW_REQUIRED"', "baseline review state missing")
@@ -80,15 +98,25 @@ def main() -> None:
     require(app, "Phase2EvaluationCoordinator.initialize(appContext);",
             "Phase 2 coordinator not initialized")
 
-    # Phase 3 remains unavailable in this Phase 2 correction build.
     require(model_processing, "PHASE3_PROCESSING_ENABLED = false",
             "Phase 3 processing is not disabled in the Phase 2 measurement build")
     require(model_processing,
             "Phase 3 model processing blocked: current build is Phase 2 evaluation only",
             "blocked Phase 3 attempts are not diagnosable")
 
-    require(version, "VERSION_NAME=1.0.7", "Phase 2 build versionName mismatch")
-    require(version, "VERSION_CODE=44", "Phase 2 build versionCode mismatch")
+    # Phase 2 architecture first shipped in v1.0.5. Check the capability floor rather than
+    # pinning CI to a single patch release.
+    properties = parse_version_properties(version)
+    version_name = properties.get("VERSION_NAME", "")
+    try:
+        version_code = int(properties.get("VERSION_CODE", "0"))
+    except ValueError as error:
+        raise SystemExit("phase2 evaluation check failed: VERSION_CODE is not an integer") from error
+    if semver_tuple(version_name) < (1, 0, 5) or version_code < 42:
+        raise SystemExit(
+            "phase2 evaluation check failed: build predates Phase 2 evaluator "
+            f"VERSION_NAME={version_name} VERSION_CODE={version_code}"
+        )
 
     print("Phase 2 evaluation architecture checks passed")
 
