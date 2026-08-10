@@ -47,10 +47,9 @@ import java.util.Set;
  * geometry into every saved high-resolution RGB camera, and emits numerical/visual diagnostics.
  *
  * <p>This class intentionally does not invoke any 3DGS trainer or differentiable rasterizer.
- * v1.0.5 is the first Pixel 10a Phase 2 measurement build, so the RGB/depth-edge pixel threshold
- * is deliberately not hard-coded yet. Hard geometric gates can pass, but the overall result stays
- * REVIEW_REQUIRED until a real-device edge-error distribution is measured and the threshold is
- * frozen in a later build.
+ * The RGB/depth-edge absolute pixel threshold remains intentionally unfrozen until Pixel 10a evidence
+ * is reviewed. v1.0.8 adds signed and quadrant edge offsets to the Drive JSON so that review can be
+ * performed remotely without asking the user to export overlay image files manually.
  */
 public final class Phase2DatasetEvaluator {
     private static final String TAG = "Phase2Eval";
@@ -237,6 +236,8 @@ public final class Phase2DatasetEvaluator {
         final JSONArray overlappingPairs = new JSONArray();
         final JSONArray rgbViews = new JSONArray();
         final JSONArray overlayResults = new JSONArray();
+        final List<Double> overlaySignedDxMedians = new ArrayList<>();
+        final List<Double> overlaySignedDyMedians = new ArrayList<>();
 
         int depthObservationCount;
         int depthUsedCount;
@@ -267,6 +268,9 @@ public final class Phase2DatasetEvaluator {
         double coverageMax = Double.NaN;
         double edgeMedianPx = Double.NaN;
         double edgeP90Px = Double.NaN;
+        double systematicDxMedianPx = Double.NaN;
+        double systematicDyMedianPx = Double.NaN;
+        double systematicOffsetMagnitudePx = Double.NaN;
 
         double minX = Double.POSITIVE_INFINITY;
         double minY = Double.POSITIVE_INFINITY;
@@ -714,6 +718,10 @@ public final class Phase2DatasetEvaluator {
                         projectionPoints);
                 overlayResults.put(overlay.json);
                 if (Double.isFinite(overlay.edgeErrorPx)) edgeErrors.add(overlay.edgeErrorPx);
+                double signedDx = overlay.json.optDouble("signed_dx_median_px", Double.NaN);
+                double signedDy = overlay.json.optDouble("signed_dy_median_px", Double.NaN);
+                if (Double.isFinite(signedDx)) overlaySignedDxMedians.add(signedDx);
+                if (Double.isFinite(signedDy)) overlaySignedDyMedians.add(signedDy);
             }
 
             if (overlayResults.length() < REQUIRED_OVERLAYS) {
@@ -725,6 +733,11 @@ public final class Phase2DatasetEvaluator {
             if (!edgeErrors.isEmpty()) {
                 edgeMedianPx = percentile(edgeErrors, 0.50);
                 edgeP90Px = percentile(edgeErrors, 0.90);
+            }
+            systematicDxMedianPx = percentile(overlaySignedDxMedians, 0.50);
+            systematicDyMedianPx = percentile(overlaySignedDyMedians, 0.50);
+            if (Double.isFinite(systematicDxMedianPx) && Double.isFinite(systematicDyMedianPx)) {
+                systematicOffsetMagnitudePx = Math.hypot(systematicDxMedianPx, systematicDyMedianPx);
             }
 
             if (DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX != null
@@ -851,6 +864,12 @@ public final class Phase2DatasetEvaluator {
 
             List<Integer> edgeCells = new ArrayList<>();
             List<Double> errorsScaledPx = new ArrayList<>();
+            List<Double> signedDxScaledPx = new ArrayList<>();
+            List<Double> signedDyScaledPx = new ArrayList<>();
+            List<List<Double>> quadrantDx = Arrays.asList(
+                    new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+            List<List<Double>> quadrantDy = Arrays.asList(
+                    new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
             for (int gy = 1; gy < analysisH - 1; gy++) {
                 for (int gx = 1; gx < analysisW - 1; gx++) {
                     int index = gy * analysisW + gx;
@@ -877,7 +896,7 @@ public final class Phase2DatasetEvaluator {
                             Math.max(0, (int) Math.round((gx + 0.5) * width / analysisW)));
                     int y = Math.min(height - 1,
                             Math.max(0, (int) Math.round((gy + 0.5) * height / analysisH)));
-                    double nearest = nearestGradientEdgeDistance(
+                    EdgeOffset nearest = nearestGradientEdgeOffset(
                             gradient,
                             gradientThreshold,
                             width,
@@ -885,10 +904,19 @@ public final class Phase2DatasetEvaluator {
                             x,
                             y,
                             EDGE_SEARCH_RADIUS_PX);
-                    double sourceScale = 0.5 * (
-                            originalCamera.width / (double) width
-                                    + originalCamera.height / (double) height);
-                    errorsScaledPx.add(nearest * sourceScale);
+                    double sourceScaleX = originalCamera.width / (double) width;
+                    double sourceScaleY = originalCamera.height / (double) height;
+                    double sourceScale = 0.5 * (sourceScaleX + sourceScaleY);
+                    errorsScaledPx.add(nearest.distancePx * sourceScale);
+                    if (nearest.found) {
+                        double dxScaled = nearest.dxPx * sourceScaleX;
+                        double dyScaled = nearest.dyPx * sourceScaleY;
+                        signedDxScaledPx.add(dxScaled);
+                        signedDyScaledPx.add(dyScaled);
+                        int quadrant = (y >= height / 2 ? 2 : 0) + (x >= width / 2 ? 1 : 0);
+                        quadrantDx.get(quadrant).add(dxScaled);
+                        quadrantDy.get(quadrant).add(dyScaled);
+                    }
                 }
             }
 
@@ -932,6 +960,24 @@ public final class Phase2DatasetEvaluator {
             json.put("rgb_edge_gradient_threshold", gradientThreshold);
             json.put("depth_edge_alignment_error_px", edgeError);
             json.put("depth_edge_alignment_p90_px", edgeP90);
+            json.put("signed_match_count", signedDxScaledPx.size());
+            json.put("signed_dx_median_px", finiteJson(percentile(signedDxScaledPx, 0.50)));
+            json.put("signed_dy_median_px", finiteJson(percentile(signedDyScaledPx, 0.50)));
+            json.put("signed_dx_direction_consensus", finiteJson(directionConsensus(signedDxScaledPx)));
+            json.put("signed_dy_direction_consensus", finiteJson(directionConsensus(signedDyScaledPx)));
+            json.put("signed_offset_semantics",
+                    "+dx: nearest RGB edge is right of projected depth edge; +dy: below");
+            JSONArray regions = new JSONArray();
+            String[] regionNames = {"top_left", "top_right", "bottom_left", "bottom_right"};
+            for (int region = 0; region < 4; region++) {
+                JSONObject regionJson = new JSONObject();
+                regionJson.put("region", regionNames[region]);
+                regionJson.put("match_count", quadrantDx.get(region).size());
+                regionJson.put("signed_dx_median_px", finiteJson(percentile(quadrantDx.get(region), 0.50)));
+                regionJson.put("signed_dy_median_px", finiteJson(percentile(quadrantDy.get(region), 0.50)));
+                regions.put(regionJson);
+            }
+            json.put("regions", regions);
             json.put(
                     "edge_threshold_policy",
                     DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX == null
@@ -1030,6 +1076,14 @@ public final class Phase2DatasetEvaluator {
                 overlayJson.put("generated_count", overlayResults.length());
                 overlayJson.put("edge_error_median_px", finiteJson(edgeMedianPx));
                 overlayJson.put("edge_error_p90_px", finiteJson(edgeP90Px));
+                JSONObject systematic = new JSONObject();
+                systematic.put("view_median_dx_px", finiteJson(systematicDxMedianPx));
+                systematic.put("view_median_dy_px", finiteJson(systematicDyMedianPx));
+                systematic.put("view_median_vector_magnitude_px", finiteJson(systematicOffsetMagnitudePx));
+                systematic.put("coordinate_semantics",
+                        "+dx RGB edge right of projected depth edge; +dy RGB edge below projected depth edge");
+                systematic.put("review_source", "machine_metrics_in_drive_log_no_manual_file_export");
+                overlayJson.put("systematic_offset_summary", systematic);
                 overlayJson.put(
                         "hard_threshold_px",
                         DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX == null
@@ -1338,6 +1392,20 @@ public final class Phase2DatasetEvaluator {
         }
     }
 
+    private static final class EdgeOffset {
+        final boolean found;
+        final double dxPx;
+        final double dyPx;
+        final double distancePx;
+
+        EdgeOffset(boolean found, double dxPx, double dyPx, double distancePx) {
+            this.found = found;
+            this.dxPx = dxPx;
+            this.dyPx = dyPx;
+            this.distancePx = distancePx;
+        }
+    }
+
     private static final class OverlayResult {
         final double edgeErrorPx;
         final JSONObject json;
@@ -1638,7 +1706,7 @@ public final class Phase2DatasetEvaluator {
         return 255;
     }
 
-    private static double nearestGradientEdgeDistance(
+    private static EdgeOffset nearestGradientEdgeOffset(
             byte[] gradient,
             int threshold,
             int width,
@@ -1647,6 +1715,9 @@ public final class Phase2DatasetEvaluator {
             int centerY,
             int radius) {
         double bestSq = Double.POSITIVE_INFINITY;
+        int bestDx = 0;
+        int bestDy = 0;
+        boolean found = false;
         for (int dy = -radius; dy <= radius; dy++) {
             int y = centerY + dy;
             if (y <= 0 || y >= height - 1) continue;
@@ -1655,10 +1726,28 @@ public final class Phase2DatasetEvaluator {
                 if (x <= 0 || x >= width - 1) continue;
                 if ((gradient[y * width + x] & 0xff) < threshold) continue;
                 double sq = dx * (double) dx + dy * (double) dy;
-                if (sq < bestSq) bestSq = sq;
+                if (sq < bestSq) {
+                    bestSq = sq;
+                    bestDx = dx;
+                    bestDy = dy;
+                    found = true;
+                }
             }
         }
-        return Double.isFinite(bestSq) ? Math.sqrt(bestSq) : radius + 1.0;
+        return found
+                ? new EdgeOffset(true, bestDx, bestDy, Math.sqrt(bestSq))
+                : new EdgeOffset(false, Double.NaN, Double.NaN, radius + 1.0);
+    }
+
+    private static double directionConsensus(List<Double> values) {
+        int positive = 0;
+        int negative = 0;
+        for (double value : values) {
+            if (!Double.isFinite(value) || value == 0.0) continue;
+            if (value > 0.0) positive++; else negative++;
+        }
+        int count = positive + negative;
+        return count == 0 ? Double.NaN : Math.max(positive, negative) / (double) count;
     }
 
     private static int countFinite(float[] values) {
