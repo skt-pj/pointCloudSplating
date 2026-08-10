@@ -24,10 +24,19 @@ def main() -> None:
     require(java, '"systematic_offset_summary"', "cross-view systematic summary missing")
     require(java, '"machine_metrics_in_drive_log_no_manual_file_export"',
             "remote review contract missing")
-    require(java, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = null",
-            "absolute edge threshold must not be invented before evidence review")
-    require(version, "VERSION_NAME=1.0.8", "versionName mismatch")
-    require(version, "VERSION_CODE=45", "versionCode mismatch")
+
+    # v1.0.8 Pixel 10a evidence was reviewed before Phase 3 activation. The old
+    # REVIEW_REQUIRED-only state must now be replaced by evidence-backed fixed gates.
+    require(java, "DEPTH_EDGE_ALIGNMENT_HARD_THRESHOLD_PX = 8.0",
+            "reviewed edge threshold is not frozen")
+    require(java, "MAX_SYSTEMATIC_OFFSET_PX = 2.0",
+            "reviewed systematic-offset threshold is missing")
+    require(java, "pixel10a_baseline_20260810_reviewed_edge_p90_8px_systematic_2px",
+            "review provenance is missing")
+    require(java, '"next_phase_allowed"', "Phase 3 gate result missing")
+
+    require(version, "VERSION_NAME=1.0.9", "versionName mismatch")
+    require(version, "VERSION_CODE=46", "versionCode mismatch")
 
     print("Phase 2 self-evaluation checks passed")
 
