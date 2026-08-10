@@ -47,6 +47,9 @@ print("Patched VkSplat Vulkan pipeline creation with Android diagnostics")
 # Apply the Mali radix port while the vendored source tree is still being prepared. This also
 # restores the radix GLSL jobs using the Android NDK glslc path after prepare removed the desktop job.
 runpy.run_path("scripts/patch-vksplat-radix-android.py", run_name="__main__")
+# Fold the global-prefix pass back into a second synchronized spine dispatch so native_3dgs keeps
+# the same stable shader-path contract while upsweep remains free of contended global atomics.
+runpy.run_path("scripts/patch-vksplat-radix-two-stage-fixup.py", run_name="__main__")
 
 # The command-batch patch depends on the Android log macros injected above, so keep the ordering
 # explicit in one entry point used by the build.
