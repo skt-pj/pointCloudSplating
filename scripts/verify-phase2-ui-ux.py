@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build-time checks for Phase 2 classification and user-facing UI correction."""
+"""Build-time checks for saved-data UI semantics across the Phase 2 -> Phase 3 transition."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,27 +39,26 @@ def main() -> None:
     require(evaluator, "MIN_CONFIDENCE = 0.30f",
             "confidence threshold must not be weakened just to obtain PASS")
 
-    require(processing, "PHASE3_PROCESSING_ENABLED = false", "Phase 3 was enabled prematurely")
+    require(processing, "PHASE3_PROCESSING_ENABLED = true", "Phase 3 is not enabled")
     require(processing, "static boolean isPhase3ProcessingEnabled()",
             "UI cannot query Phase 3 availability")
-    require(scanner, '"3Dモデル作成 準備中"', "scanner does not expose unavailable state")
-    require(scanner, "gaussianButton.setEnabled(phase3Enabled);",
-            "scanner Phase 3 action is still enabled")
-    require(scanner, '"撮影データは保存済みです。3Dモデル作成機能は現在準備中です。"',
-            "scanner does not separate saved data from unavailable model creation")
+    require(scanner, '"3Dモデルを作成"', "scanner Phase 3 action missing")
+    require(scanner, '"撮影を保存しました"', "save success state missing")
     forbid(scanner, "3Dプレビューを作成できます。",
-            "save success must not promise an unavailable downstream action")
+            "save success must not promise an old preview path")
     forbid(job, "安全のため", "meaningless internal safety wording leaked to users")
+    require(job, "Phase2DatasetEvaluator.hasStoredPass(datasetDirectory)",
+            "Phase 3 can bypass the Phase 2 PASS gate")
 
-    require(library, "!ModelProcessingCoordinator.isPhase3ProcessingEnabled()",
-            "library can still start unavailable Phase 3 processing")
-    require(library, "撮影データ保存済み",
-            "library must represent saved data without promising model creation")
+    require(library, "ModelProcessingCoordinator.isPhase3ProcessingEnabled()",
+            "library does not use Phase 3 availability")
+    require(library, "品質確認待ち",
+            "library does not distinguish machine-complete model from final visual quality PASS")
 
-    require(version, "VERSION_NAME=1.0.8", "versionName mismatch")
-    require(version, "VERSION_CODE=45", "versionCode mismatch")
+    require(version, "VERSION_NAME=1.0.9", "versionName mismatch")
+    require(version, "VERSION_CODE=46", "versionCode mismatch")
 
-    print("Phase 2/UI correction checks passed")
+    print("Phase 2/3 UI transition checks passed")
 
 
 if __name__ == "__main__":
