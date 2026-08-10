@@ -37,6 +37,7 @@ public final class DiagnosticLog {
             new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
 
     private static File persistentFile;
+    private static String currentProcessStartMarker;
 
     private DiagnosticLog() {}
 
@@ -45,12 +46,14 @@ public final class DiagnosticLog {
         persistentFile = new File(appContext.getFilesDir(), LOG_FILE_NAME);
         loadRecentPersistentLinesLocked();
         recordHistoricalProcessExitsLocked(appContext);
+        currentProcessStartMarker =
+                "process start pid=" + android.os.Process.myPid()
+                        + " version=" + BuildConfig.VERSION_NAME
+                        + " sdk=" + Build.VERSION.SDK_INT;
         addLocked(
                 "I",
                 "DiagnosticLog",
-                "process start pid=" + android.os.Process.myPid()
-                        + " version=" + BuildConfig.VERSION_NAME
-                        + " sdk=" + Build.VERSION.SDK_INT,
+                currentProcessStartMarker,
                 null);
     }
 
@@ -94,6 +97,20 @@ public final class DiagnosticLog {
         return out.toString();
     }
 
+    /**
+     * Returns only the current process section for remote diagnostics. Historical process output is
+     * intentionally excluded so the Drive document stays focused on the device run being tested.
+     */
+    public static synchronized String currentProcessSnapshot() {
+        String all = snapshot();
+        String marker = currentProcessStartMarker;
+        if (marker == null || marker.isEmpty()) return all;
+        int markerIndex = all.lastIndexOf(marker);
+        if (markerIndex < 0) return all;
+        int lineStart = all.lastIndexOf('\n', Math.max(0, markerIndex - 1));
+        return all.substring(lineStart < 0 ? 0 : lineStart + 1);
+    }
+
     private static synchronized void add(
             String level, String tag, String message, Throwable throwable) {
         addLocked(level, tag, message, throwable);
@@ -118,6 +135,7 @@ public final class DiagnosticLog {
             LINES.removeFirst();
         }
         appendPersistentLocked(value);
+        DriveDiagnosticLogStore.requestOverwrite();
     }
 
     private static void appendPersistentLocked(String line) {
