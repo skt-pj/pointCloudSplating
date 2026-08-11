@@ -64,6 +64,9 @@ jobs:
       - name: Apply v1.0.10 long-training stability
         run: python3 scripts/apply-v1.0.10-long-training-stability.py
 
+      - name: Apply v1.0.11 Gaussian shape stability
+        run: python3 scripts/apply-v1.0.11-gaussian-shape-stability.py
+
       - name: Verify Drive diagnostics overwrite
         run: python3 scripts/verify-drive-diagnostics.py
 
@@ -84,6 +87,9 @@ jobs:
 
       - name: Verify long-training numerical stability
         run: python3 scripts/verify-long-training-stability.py
+
+      - name: Verify Gaussian shape stability
+        run: python3 scripts/verify-gaussian-shape-stability.py
 
       - name: Verify mobile trainer architecture
         run: python3 scripts/verify-mobile-trainer.py
@@ -117,6 +123,21 @@ jobs:
         with:
           name: pointCloudSplating-v${{ env.VERSION_NAME }}-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Persist v1.0.11 runtime sources
+        if: github.ref == 'refs/heads/agent/v1.0.11-gaussian-shape-stability'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/GaussianModel.java \
+            app/src/main/cpp/native_3dgs.cpp
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "apply v1.0.11 Gaussian shape stability"
+          git push origin HEAD
 
       - name: Persist v1.0.10 runtime sources
         if: github.ref == 'refs/heads/agent/v1.0.10-long-training-stability'
