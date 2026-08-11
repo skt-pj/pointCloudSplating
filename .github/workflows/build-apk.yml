@@ -48,7 +48,15 @@ jobs:
         run: python3 scripts/apply-v1.0.7-phase2-ui-fix.py
 
       - name: Apply v1.0.8 Phase 2 self-evaluation metrics
-        run: python3 scripts/apply-v1.0.8-phase2-self-eval.py
+        run: |
+          PHASE2=app/src/main/java/com/sktpj/pointcloudsplatting/Phase2DatasetEvaluator.java
+          if grep -q 'systematic_offset_summary' "$PHASE2" \
+            && grep -q 'signed_dx_median_px' "$PHASE2" \
+            && grep -q 'nearestGradientEdgeOffset' "$PHASE2"; then
+            echo "v1.0.8 Phase 2 self-evaluation metrics already present"
+          else
+            python3 scripts/apply-v1.0.8-phase2-self-eval.py
+          fi
 
       - name: Apply v1.0.9 Phase 3 pipeline
         run: python3 scripts/apply-v1.0.9-phase3.py
