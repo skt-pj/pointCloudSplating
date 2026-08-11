@@ -62,13 +62,15 @@ def main() -> None:
         fail("single-workgroup global prefix dispatch missing")
 
     active_cache = re.search(r'^\s*private static final String SHADER_CACHE = "([^"]+)";', java, re.M)
-    expected_cache = "vksplat_shader_41cff93b_glslc256_radix16_v8"
+    expected_cache = "vksplat_shader_41cff93b_glslc256_radix16_v9"
     if not active_cache or active_cache.group(1) != expected_cache:
-        fail(f"active shader cache is not v8: {active_cache.group(1) if active_cache else 'missing'}")
+        fail(f"active shader cache is not v9: {active_cache.group(1) if active_cache else 'missing'}")
     if "two_stage_no_global_atomic" not in java:
         fail("runtime radix-generation diagnostic marker missing")
     if "numeric=finite_projection+mcmc_relocation+adam_rollback" not in java:
-        fail("v1.0.10 numerical-stability cache generation marker missing")
+        fail("numerical-stability cache generation marker missing")
+    if "shape=metric_scale_cap_6cm+mcmc_cumulative+resume_sanitize" not in java:
+        fail("v1.0.11 shape-stability cache generation marker missing")
 
     shader_dir = VKSPLAT / "shader/radix_sort"
     spv_paths = [shader_dir / "upsweep.spv", shader_dir / "spine.spv", shader_dir / "downsweep.spv"]
@@ -85,7 +87,7 @@ def main() -> None:
             for path in spv_paths:
                 subprocess.run([str(validator), "--target-env", "vulkan1.2", str(path)], check=True)
 
-    print("Radix stability checks passed: subgroup16 local256, no upsweep global atomics, two-stage spine prefix, cache v8")
+    print("Radix stability checks passed: subgroup16 local256, no upsweep global atomics, two-stage spine prefix, cache v9")
 
 
 if __name__ == "__main__":
