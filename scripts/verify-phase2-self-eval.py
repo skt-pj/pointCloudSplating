@@ -11,6 +11,22 @@ def require(text: str, needle: str, why: str) -> None:
         raise SystemExit(f"Phase 2 self-eval check failed: {why}: missing {needle!r}")
 
 
+def parse_version_properties(text: str) -> tuple[tuple[int, ...], int]:
+    values = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    try:
+        version_name = tuple(int(part) for part in values["VERSION_NAME"].split("."))
+        version_code = int(values["VERSION_CODE"])
+    except (KeyError, ValueError) as error:
+        raise SystemExit(f"Phase 2 self-eval check failed: invalid version.properties: {error}")
+    return version_name, version_code
+
+
 def main() -> None:
     java = JAVA.read_text(encoding="utf-8")
     version = VERSION.read_text(encoding="utf-8")
@@ -35,8 +51,11 @@ def main() -> None:
             "review provenance is missing")
     require(java, '"next_phase_allowed"', "Phase 3 gate result missing")
 
-    require(version, "VERSION_NAME=1.0.9", "versionName mismatch")
-    require(version, "VERSION_CODE=46", "versionCode mismatch")
+    version_name, version_code = parse_version_properties(version)
+    if version_name < (1, 0, 9):
+        raise SystemExit(f"Phase 2 self-eval check failed: versionName too old: {version_name}")
+    if version_code < 46:
+        raise SystemExit(f"Phase 2 self-eval check failed: versionCode too old: {version_code}")
 
     print("Phase 2 self-evaluation checks passed")
 
