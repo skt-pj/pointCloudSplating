@@ -42,6 +42,7 @@ def main() -> None:
     require(store, 'sha256', "per-file hash manifest missing")
     require(store, 'analysis_manifest.json', "bundle manifest missing")
     require(store, 'cloud_upload_confirmation', "SAF cloud-sync limitation is not explicit")
+    require(store, 'source changed during export:', "export does not reject a mutating source snapshot")
 
     require(library, '解析データをDriveへ更新', "manual analysis export menu missing")
     require(library, 'REQUEST_SAVE_ANALYSIS', "analysis destination request missing")
