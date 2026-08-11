@@ -59,7 +59,20 @@ jobs:
           fi
 
       - name: Apply v1.0.9 Phase 3 pipeline
-        run: python3 scripts/apply-v1.0.9-phase3.py
+        run: |
+          JOB=app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java
+          TRAINER=app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java
+          EXPORTER=app/src/main/java/com/sktpj/pointcloudsplatting/ColmapDatasetExporter.java
+          NATIVE=app/src/main/cpp/native_3dgs.cpp
+          if test -f app/src/main/java/com/sktpj/pointcloudsplatting/Phase3DatasetEvaluator.java \
+            && grep -q 'Phase3DatasetEvaluator.evaluate' "$JOB" \
+            && grep -q 'progressive_low_mid_high_patch' "$TRAINER" \
+            && grep -q 'phase2_geometry_prior.ply' "$EXPORTER" \
+            && grep -q 'phase3_holdout_render_' "$NATIVE"; then
+            echo "v1.0.9 Phase 3 runtime already present"
+          else
+            python3 scripts/apply-v1.0.9-phase3.py
+          fi
 
       - name: Apply v1.0.10 long-training stability
         run: python3 scripts/apply-v1.0.10-long-training-stability.py
