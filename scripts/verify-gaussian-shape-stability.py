@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build-time contract checks for PCS v1.0.11 needle-splat correction."""
+"""Build-time contract checks for PCS v1.0.11+ needle-splat correction."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,8 +82,14 @@ def main() -> None:
             "shape-changing shaders are not isolated in cache v9")
     require(java, "shape=metric_scale_cap_6cm+mcmc_cumulative+resume_sanitize",
             "runtime shape generation marker missing")
-    require(version, "VERSION_NAME=1.0.11", "versionName mismatch")
-    require(version, "VERSION_CODE=48", "versionCode mismatch")
+
+    values = dict(line.split("=", 1) for line in version.splitlines() if "=" in line)
+    try:
+        version_code = int(values.get("VERSION_CODE", "0"))
+    except ValueError:
+        raise SystemExit("Gaussian shape stability check failed: invalid VERSION_CODE")
+    if version_code < 48:
+        raise SystemExit("Gaussian shape stability check failed: shape fix requires VERSION_CODE >= 48")
 
     print("Gaussian shape stability checks passed: metric 6cm cap, cumulative MCMC, checkpoint/viewer repair")
 
