@@ -40,6 +40,8 @@ constexpr int kScaleNeighbors = 3;
 constexpr float kNormalThicknessRatio = 0.20f;
 constexpr float kMinSurfaceScale = 5.0e-4f;
 constexpr float kMaxSurfaceScale = 5.0e-2f;
+constexpr float kMinTrainedGaussianScale = 1.0e-4f;
+constexpr float kMaxTrainedGaussianScale = 6.0e-2f;
 
 void logi(const std::string& text) {
     __android_log_print(ANDROID_LOG_INFO, kTag, "%s", text.c_str());
@@ -455,6 +457,77 @@ void initializeSurfaceGaussians(VulkanGSTrainer& trainer, VulkanGSPipelineBuffer
     logi(info.str());
 }
 
+void sanitizeGaussianShape(VulkanGSTrainer& trainer,
+                           VulkanGSPipelineBuffers& buffers,
+                           const char* phase) {
+    const size_t n = buffers.num_splats;
+    if (n == 0 || buffers.scales_opacs.deviceBuffer.buffer == VK_NULL_HANDLE) return;
+
+    trainer.copyFromDevice(buffers.scales_opacs);
+    if (buffers.scales_opacs.size() < 4 * n)
+        throw std::runtime_error("Gaussian shape sanitizer received a short scale buffer");
+
+    const bool hasMoments = buffers.g_scales_opacs.deviceBuffer.buffer != VK_NULL_HANDLE
+            && buffers.g_scales_opacs.deviceSize() >= 8 * n;
+    if (hasMoments) trainer.copyFromDevice(buffers.g_scales_opacs);
+
+    size_t clampedGaussians = 0;
+    size_t clampedAxes = 0;
+    size_t nonFiniteAxes = 0;
+    float maxScaleBefore = 0.0f;
+    float maxScaleAfter = 0.0f;
+    bool scaleChanged = false;
+    bool momentsChanged = false;
+
+    for (size_t i = 0; i < n; ++i) {
+        bool gaussianChanged = false;
+        for (int axis = 0; axis < 3; ++axis) {
+            const size_t idx = 4 * i + static_cast<size_t>(axis);
+            float value = buffers.scales_opacs[idx];
+            if (std::isfinite(value) && value > 0.0f)
+                maxScaleBefore = std::max(maxScaleBefore, value);
+            else
+                nonFiniteAxes++;
+
+            float corrected = value;
+            if (!std::isfinite(corrected) || corrected <= 0.0f)
+                corrected = kMinTrainedGaussianScale;
+            corrected = std::clamp(corrected,
+                                   kMinTrainedGaussianScale,
+                                   kMaxTrainedGaussianScale);
+            if (!std::isfinite(value) || corrected != value) {
+                buffers.scales_opacs[idx] = corrected;
+                clampedAxes++;
+                gaussianChanged = true;
+                scaleChanged = true;
+                if (hasMoments) {
+                    // g_scales_opacs stores two float4 Adam moments per Gaussian.
+                    buffers.g_scales_opacs[8 * i + static_cast<size_t>(axis)] = 0.0f;
+                    buffers.g_scales_opacs[8 * i + 4 + static_cast<size_t>(axis)] = 0.0f;
+                    momentsChanged = true;
+                }
+            }
+            maxScaleAfter = std::max(maxScaleAfter, corrected);
+        }
+        if (gaussianChanged) clampedGaussians++;
+    }
+
+    if (scaleChanged) trainer.copyToDevice(buffers.scales_opacs);
+    if (momentsChanged) trainer.copyToDevice(buffers.g_scales_opacs);
+
+    std::ostringstream info;
+    info << "Gaussian shape sanitize phase=" << (phase ? phase : "unknown")
+         << " gaussians=" << n
+         << " clampedGaussians=" << clampedGaussians
+         << " clampedAxes=" << clampedAxes
+         << " nonFiniteAxes=" << nonFiniteAxes
+         << " maxScaleBeforeM=" << maxScaleBefore
+         << " maxScaleAfterM=" << maxScaleAfter
+         << " capM=" << kMaxTrainedGaussianScale
+         << " momentsReset=" << (momentsChanged ? 1 : 0);
+    logi(info.str());
+}
+
 size_t maxTileIndicesForBudget() {
     const size_t bytesPerIndex = 2 * sizeof(sortingKey_t) + 2 * sizeof(int32_t);
     return std::max<size_t>(1, kTileWorkingSetBudgetBytes / bytesPerIndex);
@@ -740,6 +813,8 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
             progress.send(7, "保存したGaussian・optimizer状態を復元しました…");
             logi("Training checkpoint restored steps=" + std::to_string(completedBeforeRun)
                  + " gaussians=" + std::to_string(buffers.num_splats));
+            // Salvage v1.0.10 exact checkpoints in place; do not throw away learned appearance.
+            sanitizeGaussianShape(trainer, buffers, "checkpoint_restore");
         } else {
             spatialBudgetInitialCloud(trainer, buffers, kInitialGaussianBudget);
             progress.send(7, "Depthから表面方向を推定しています…");
@@ -795,6 +870,8 @@ Java_com_sktpj_pointcloudsplatting_NativeGaussianTrainer_nativeTrain(
             throw std::runtime_error(error.str());
         }
 
+        // Audit and repair once more before hold-out rendering, PLY output and checkpoint save.
+        sanitizeGaussianShape(trainer, buffers, "pre_validation_output");
         progress.send(96, "学習結果を確認しています…");
         ValidationMetrics validation = validationMetrics(trainer, uniforms, buffers, dataRoot);
         double psnr = validation.psnr;

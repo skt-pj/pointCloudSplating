@@ -48,6 +48,7 @@ final class GaussianModel {
 final class GaussianPlyModelReader {
     private static final String TAG = "GaussianViewer";
     private static final int ROBUST_SAMPLE_LIMIT = 8192;
+    private static final float MAX_WORLD_SCALE_METERS = 0.06f;
 
     static GaussianModel read(File file) throws IOException {
         try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
@@ -181,6 +182,10 @@ final class GaussianPlyModelReader {
             float centerZ = centerRadius[2];
             float radius = centerRadius[3];
 
+            final float viewerScaleCap = Math.min(0.35f,
+                    MAX_WORLD_SCALE_METERS / Math.max(radius, 1e-6f));
+            int clampedScaleAxes = 0;
+
             float[] positionsOut = new float[validCount * 3];
             float[] dcOut = new float[validCount * 3];
             float[] shOut = new float[validCount * GaussianModel.SH_REST_FLOATS];
@@ -206,9 +211,15 @@ final class GaussianPlyModelReader {
                 dcOut[dstP + 2] = dc[srcP + 2];
                 System.arraycopy(shRest, srcSh, shOut, dstSh, GaussianModel.SH_REST_FLOATS);
                 alphaOut[outIndex] = alpha[i];
-                scalesOut[dstP] = clamp(worldScales[srcP] / radius, 1e-6f, 0.35f);
-                scalesOut[dstP + 1] = clamp(worldScales[srcP + 1] / radius, 1e-6f, 0.35f);
-                scalesOut[dstP + 2] = clamp(worldScales[srcP + 2] / radius, 1e-6f, 0.35f);
+                float nsx = worldScales[srcP] / radius;
+                float nsy = worldScales[srcP + 1] / radius;
+                float nsz = worldScales[srcP + 2] / radius;
+                if (nsx > viewerScaleCap) clampedScaleAxes++;
+                if (nsy > viewerScaleCap) clampedScaleAxes++;
+                if (nsz > viewerScaleCap) clampedScaleAxes++;
+                scalesOut[dstP] = clamp(nsx, 1e-6f, viewerScaleCap);
+                scalesOut[dstP + 1] = clamp(nsy, 1e-6f, viewerScaleCap);
+                scalesOut[dstP + 2] = clamp(nsz, 1e-6f, viewerScaleCap);
                 System.arraycopy(rotations, srcR, rotationsOut, dstR, 4);
                 outIndex++;
             }
@@ -219,9 +230,11 @@ final class GaussianPlyModelReader {
                             Locale.US,
                             "Loaded model gaussians=%d/%d robustCenter=(%.3f,%.3f,%.3f) "
                                     + "radius99=%.3f anisotropic=%d SHprops=%d sh1=%d sh2=%d sh3=%d "
+                                    + "viewerScaleCapM=%.3f clampedScaleAxes=%d "
                                     + "viewer=ANISOTROPIC_COVARIANCE_SORTED_ES3 appearance=SH0_SH3",
                             validCount, header.vertexCount, centerX, centerY, centerZ, radius,
-                            anisotropicCount, availableRest, sh1Count, sh2Count, sh3Count));
+                            anisotropicCount, availableRest, sh1Count, sh2Count, sh3Count,
+                            MAX_WORLD_SCALE_METERS, clampedScaleAxes));
 
             return new GaussianModel(
                     validCount, positionsOut, dcOut, shOut,
