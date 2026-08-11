@@ -22,6 +22,22 @@ def forbid(text: str, needle: str, why: str) -> None:
         raise SystemExit(f"Phase 2/UI check failed: {why}: found {needle!r}")
 
 
+def parse_version_properties(text: str) -> tuple[tuple[int, ...], int]:
+    values = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    try:
+        version_name = tuple(int(part) for part in values["VERSION_NAME"].split("."))
+        version_code = int(values["VERSION_CODE"])
+    except (KeyError, ValueError) as error:
+        raise SystemExit(f"Phase 2/UI check failed: invalid version.properties: {error}")
+    return version_name, version_code
+
+
 def main() -> None:
     evaluator = EVALUATOR.read_text(encoding="utf-8")
     scanner = SCANNER.read_text(encoding="utf-8")
@@ -55,8 +71,11 @@ def main() -> None:
     require(library, "品質確認待ち",
             "library does not distinguish machine-complete model from final visual quality PASS")
 
-    require(version, "VERSION_NAME=1.0.9", "versionName mismatch")
-    require(version, "VERSION_CODE=46", "versionCode mismatch")
+    version_name, version_code = parse_version_properties(version)
+    if version_name < (1, 0, 9):
+        raise SystemExit(f"Phase 2/UI check failed: versionName too old: {version_name}")
+    if version_code < 46:
+        raise SystemExit(f"Phase 2/UI check failed: versionCode too old: {version_code}")
 
     print("Phase 2/3 UI transition checks passed")
 
