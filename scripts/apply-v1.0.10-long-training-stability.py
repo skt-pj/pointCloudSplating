@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply v1.0.10 runtime identifiers for long-training numerical stability."""
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAINER = ROOT / "app/src/main/java/com/sktpj/pointcloudsplatting/NativeGaussianTrainer.java"
@@ -10,9 +11,13 @@ text = TRAINER.read_text(encoding="utf-8")
 old = 'private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v7";'
 new = 'private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v8";'
 if new not in text:
-    if old not in text:
-        raise SystemExit("v1.0.10 patch failed: shader cache v7 anchor missing")
-    text = text.replace(old, new, 1)
+    if old in text:
+        text = text.replace(old, new, 1)
+    else:
+        match = re.search(r'private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v(\d+)";', text)
+        if not match or int(match.group(1)) < 8:
+            raise SystemExit("v1.0.10 patch failed: compatible shader cache v8+ missing")
+        # A later runtime generation (for example v1.0.11 cache v9) already contains this fix.
 
 old_diag = ' + " cumsum=glslc256 radix=glslc256/subgroup16/two_stage_no_global_atomic"\n'
 new_diag = (' + " cumsum=glslc256 radix=glslc256/subgroup16/two_stage_no_global_atomic"\n'
@@ -32,4 +37,4 @@ if new_version not in verify:
     verify = verify.replace(old_version, new_version, 1)
 PHASE3_VERIFY.write_text(verify, encoding="utf-8")
 
-print("Applied v1.0.10 long-training runtime identifiers and verifier compatibility")
+print("Applied/verified v1.0.10 long-training runtime identifiers and verifier compatibility")
