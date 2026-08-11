@@ -151,6 +151,7 @@ public final class GaussianSplatJob {
         }
 
         if (!trained.success) {
+            DriveAnalysisExportStore.requestExport(datasetDirectory);
             DiagnosticLog.w(TAG, "3DGS continuation failed: " + trained.message
                     + " exactCheckpointBefore=" + exactCheckpointBeforeRun);
             return Result.fail(trained.message, frameCount);
@@ -177,6 +178,7 @@ public final class GaussianSplatJob {
 
         deleteLegacyResumeHint(datasetDirectory);
         Phase3DatasetEvaluator.Result phase3 = Phase3DatasetEvaluator.evaluate(datasetDirectory);
+        DriveAnalysisExportStore.requestExport(datasetDirectory);
         if (!phase3.machineGatePassed) {
             return Result.fail("追加学習は完了しましたが、結果検証に失敗しました。", frameCount);
         }
@@ -265,6 +267,7 @@ public final class GaussianSplatJob {
             }
 
             if (!trained.success) {
+                DriveAnalysisExportStore.requestExport(datasetDirectory);
                 DiagnosticLog.w(TAG, "Full 3DGS failed: " + trained.message);
                 return Result.fail(trained.message, count);
             }
@@ -283,6 +286,7 @@ public final class GaussianSplatJob {
             }
 
             Phase3DatasetEvaluator.Result phase3 = Phase3DatasetEvaluator.evaluate(datasetDirectory);
+            DriveAnalysisExportStore.requestExport(datasetDirectory);
             if (!phase3.machineGatePassed) {
                 DiagnosticLog.e(TAG, "Phase 3 machine evaluation failed after trainer completion");
                 return Result.fail("3Dモデルは学習しましたが、結果検証に失敗しました。", count);
@@ -299,6 +303,7 @@ public final class GaussianSplatJob {
             return Result.complete("3DGS学習完了・品質確認待ち", count, trained.gaussianCount, trained.outputFile);
         } catch (Exception e) {
             ModelProcessingCoordinator.exit();
+            DriveAnalysisExportStore.requestExport(datasetDirectory);
             DiagnosticLog.e(TAG, "Full 3DGS job failed", e);
             return Result.fail("3Dモデルの学習に失敗しました。", 0);
         }

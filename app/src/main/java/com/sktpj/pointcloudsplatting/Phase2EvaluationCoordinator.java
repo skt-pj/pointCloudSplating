@@ -67,6 +67,7 @@ public final class Phase2EvaluationCoordinator {
                             + " failures=" + result.failureCount
                             + " warnings=" + result.warningCount);
             DriveDiagnosticLogStore.requestOverwrite();
+            DriveAnalysisExportStore.requestExport(dataset);
         } catch (Throwable error) {
             DiagnosticLog.e(TAG, "Phase 2 background evaluation failed", error);
         } finally {

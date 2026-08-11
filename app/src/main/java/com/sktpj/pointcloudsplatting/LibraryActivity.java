@@ -43,8 +43,11 @@ import java.util.Locale;
 public final class LibraryActivity extends Activity {
     private static final String TAG = "PointCloudLibrary";
     private static final int REQUEST_SAVE_LOG = 1201;
+    private static final int REQUEST_SAVE_ANALYSIS = 1202;
     private static final int MENU_SAVE_LOG = 1;
     private static final int MENU_CHANGE_LOG_DESTINATION = 2;
+    private static final int MENU_EXPORT_ANALYSIS = 3;
+    private static final int MENU_CHANGE_ANALYSIS_DESTINATION = 4;
     private static final int CARD_THUMBNAIL_HEIGHT_DP = 150;
     private static final String FINAL_SPLAT = "splat.ply";
     private static final String PREVIEW_SPLAT = "preview_splat.ply";
@@ -76,9 +79,14 @@ public final class LibraryActivity extends Activity {
         boolean configured=DriveDiagnosticLogStore.hasDestination(this);
         popup.getMenu().add(0,MENU_SAVE_LOG,0,configured?"Driveログを更新":"Driveログ保存先を設定");
         if(configured)popup.getMenu().add(0,MENU_CHANGE_LOG_DESTINATION,1,"Driveログ保存先を変更");
+        boolean analysisConfigured=DriveAnalysisExportStore.hasDestination(this);
+        popup.getMenu().add(0,MENU_EXPORT_ANALYSIS,2,analysisConfigured?"解析データをDriveへ更新":"解析データのDrive保存先を設定");
+        if(analysisConfigured)popup.getMenu().add(0,MENU_CHANGE_ANALYSIS_DESTINATION,3,"解析データのDrive保存先を変更");
         popup.setOnMenuItemClickListener(item->{
             if(item.getItemId()==MENU_SAVE_LOG){saveDiagnosticLog();return true;}
             if(item.getItemId()==MENU_CHANGE_LOG_DESTINATION){chooseDriveDiagnosticDestination();return true;}
+            if(item.getItemId()==MENU_EXPORT_ANALYSIS){saveAnalysisBundle();return true;}
+            if(item.getItemId()==MENU_CHANGE_ANALYSIS_DESTINATION){chooseDriveAnalysisDestination();return true;}
             return false;
         });
         popup.show();
@@ -96,17 +104,40 @@ public final class LibraryActivity extends Activity {
         startActivityForResult(DriveDiagnosticLogStore.createDestinationIntent(),REQUEST_SAVE_LOG);
     }
 
+    private void saveAnalysisBundle(){
+        if(!DriveAnalysisExportStore.hasDestination(this)){chooseDriveAnalysisDestination();return;}
+        Toast.makeText(this,"原画像・点群・処理結果をDrive保存先へ書き込んでいます…",Toast.LENGTH_SHORT).show();
+        DriveAnalysisExportStore.exportLatestNow((success,message)->runOnUiThread(()->
+                Toast.makeText(this,message,success?Toast.LENGTH_SHORT:Toast.LENGTH_LONG).show()));
+    }
+
+    private void chooseDriveAnalysisDestination(){
+        Toast.makeText(this,"Google Driveで解析ZIPの保存先を選択してください",Toast.LENGTH_SHORT).show();
+        startActivityForResult(DriveAnalysisExportStore.createDestinationIntent(),REQUEST_SAVE_ANALYSIS);
+    }
+
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
         super.onActivityResult(requestCode,resultCode,data);
-        if(requestCode!=REQUEST_SAVE_LOG)return;
         if(resultCode!=RESULT_OK||data==null||data.getData()==null)return;
-        if(!DriveDiagnosticLogStore.registerDestination(this,data)){
-            Toast.makeText(this,"Driveの保存先を設定できませんでした",Toast.LENGTH_LONG).show();
+        if(requestCode==REQUEST_SAVE_LOG){
+            if(!DriveDiagnosticLogStore.registerDestination(this,data)){
+                Toast.makeText(this,"Driveの保存先を設定できませんでした",Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(this,"Driveログを設定しました。以後は同じファイルを上書きします",Toast.LENGTH_SHORT).show();
+            DriveDiagnosticLogStore.overwriteNow((success,message)->runOnUiThread(()->
+                    Toast.makeText(this,message,success?Toast.LENGTH_SHORT:Toast.LENGTH_LONG).show()));
             return;
         }
-        Toast.makeText(this,"Driveログを設定しました。以後は同じファイルを上書きします",Toast.LENGTH_SHORT).show();
-        DriveDiagnosticLogStore.overwriteNow((success,message)->runOnUiThread(()->
-                Toast.makeText(this,message,success?Toast.LENGTH_SHORT:Toast.LENGTH_LONG).show()));
+        if(requestCode==REQUEST_SAVE_ANALYSIS){
+            if(!DriveAnalysisExportStore.registerDestination(this,data)){
+                Toast.makeText(this,"解析データのDrive保存先を設定できませんでした",Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(this,"解析データ保存先を設定しました。現在のdatasetを書き出します",Toast.LENGTH_SHORT).show();
+            DriveAnalysisExportStore.exportLatestNow((success,message)->runOnUiThread(()->
+                    Toast.makeText(this,message,success?Toast.LENGTH_SHORT:Toast.LENGTH_LONG).show()));
+        }
     }
 
     private void reloadLibrary(){File pictures=getExternalFilesDir(Environment.DIRECTORY_PICTURES);List<File>datasets=findSavedDatasets(pictures);grid.removeAllViews();emptyView.setVisibility(datasets.isEmpty()?View.VISIBLE:View.GONE);for(File dataset:datasets){migrateLegacyArtifacts(dataset);grid.addView(createDatasetCard(dataset));}}

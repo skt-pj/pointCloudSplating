@@ -12,6 +12,7 @@ public final class PointCloudApp extends Application {
         super.onCreate();
         appContext = getApplicationContext();
         DriveDiagnosticLogStore.initialize(appContext);
+        DriveAnalysisExportStore.initialize(appContext);
         DiagnosticLog.initialize(appContext);
         Phase2EvaluationCoordinator.initialize(appContext);
         DriveDiagnosticLogStore.requestOverwrite();

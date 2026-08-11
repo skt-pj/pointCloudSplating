@@ -143,6 +143,7 @@ public final class DatasetFinalizer {
                             + " failures=" + evaluation.failureCount
                             + " warnings=" + evaluation.warningCount);
             File finalDirectory = renameAsSavedDataset(workingDirectory);
+            DriveAnalysisExportStore.requestExport(finalDirectory);
             return Result.ok(finalDirectory, sourceFrames.size());
         } catch (IOException | JSONException | RuntimeException e) {
             DiagnosticLog.e("DatasetFinalizer", "Failed to finalize dataset", e);
