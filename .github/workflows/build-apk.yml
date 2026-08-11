@@ -67,8 +67,14 @@ jobs:
       - name: Apply v1.0.11 Gaussian shape stability
         run: python3 scripts/apply-v1.0.11-gaussian-shape-stability.py
 
+      - name: Apply v1.0.12 Drive analysis export
+        run: python3 scripts/apply-v1.0.12-drive-analysis-export.py
+
       - name: Verify Drive diagnostics overwrite
         run: python3 scripts/verify-drive-diagnostics.py
+
+      - name: Verify Drive analysis export
+        run: python3 scripts/verify-drive-analysis-export.py
 
       - name: Verify Phase 1 observation evaluation
         run: python3 scripts/verify-phase1-evaluation.py
@@ -123,6 +129,24 @@ jobs:
         with:
           name: pointCloudSplating-v${{ env.VERSION_NAME }}-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Persist v1.0.12 runtime sources
+        if: github.ref == 'refs/heads/agent/v1.0.12-drive-analysis-export'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            app/src/main/java/com/sktpj/pointcloudsplatting/DriveAnalysisExportStore.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/PointCloudApp.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/DatasetFinalizer.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/Phase2EvaluationCoordinator.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/GaussianSplatJob.java \
+            app/src/main/java/com/sktpj/pointcloudsplatting/LibraryActivity.java
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "apply v1.0.12 Drive analysis export"
+          git push origin HEAD
 
       - name: Persist v1.0.11 runtime sources
         if: github.ref == 'refs/heads/agent/v1.0.11-gaussian-shape-stability'
