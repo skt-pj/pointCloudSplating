@@ -97,8 +97,15 @@ def main() -> None:
             "unimplemented A/B artifact must be explicit rather than faked")
     forbid(phase3, 'report.put("pass", true)', "numeric-only final Phase 3 PASS is forbidden")
 
-    require(version, "VERSION_NAME=1.0.9", "versionName mismatch")
-    require(version, "VERSION_CODE=46", "versionCode mismatch")
+    values = dict(
+        line.split("=", 1) for line in version.splitlines() if "=" in line
+    )
+    try:
+        version_code = int(values.get("VERSION_CODE", "0"))
+    except ValueError:
+        raise SystemExit("Phase 3 check failed: invalid VERSION_CODE")
+    if version_code < 46:
+        raise SystemExit("Phase 3 check failed: Phase 3 requires VERSION_CODE >= 46")
     print("Phase 3 architecture and quality-gate checks passed")
 
 

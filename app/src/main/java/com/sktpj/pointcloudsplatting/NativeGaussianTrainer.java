@@ -19,7 +19,7 @@ public final class NativeGaussianTrainer {
     private static final String ASSET_ROOT = "vksplat_shader";
     // Kept as an explicit legacy identifier so diagnostics can distinguish a stale v1.0.1 cache.
     private static final String LEGACY_SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v6";
-    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v7";
+    private static final String SHADER_CACHE = "vksplat_shader_41cff93b_glslc256_radix16_v8";
     private static final String CHECKPOINT_FILE = "3dgs_checkpoint.bin";
     private static final String PHASE3_STATE_FILE = "phase3_training_state.json";
     private static final String PHASE3_PROFILE = "progressive_low_mid_high_patch";
@@ -177,6 +177,7 @@ public final class NativeGaussianTrainer {
                     "Using VkSplat shader cache=" + shaderDir.getName()
                             + " legacyCache=" + LEGACY_SHADER_CACHE
                             + " cumsum=glslc256 radix=glslc256/subgroup16/two_stage_no_global_atomic"
+                            + " numeric=finite_projection+mcmc_relocation+adam_rollback"
                             + " requestedSteps=" + requestedSteps
                             + " checkpointBefore=" + checkpointBeforeRun);
             logCumsumShaderIdentity(shaderDir, "cumsum_single_pass.spv");
