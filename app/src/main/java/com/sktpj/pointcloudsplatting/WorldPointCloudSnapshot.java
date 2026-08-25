@@ -29,7 +29,7 @@ public final class WorldPointCloudSnapshot {
         this.confidence = confidence;
     }
 
-    /** Copies the DepthData now, while its ARCore anchor is still active. */
+    /** Copies the Raw Depth sample using its immutable camera-pose snapshot. */
     public static WorldPointCloudSnapshot from(DepthData depth, Pose rootPose) {
         FloatBuffer points = depth.getPoints().duplicate();
         FloatBuffer colors = depth.getColors().duplicate();
@@ -41,7 +41,7 @@ public final class WorldPointCloudSnapshot {
                 colors.remaining() / COLOR_FLOATS_PER_POINT);
 
         float[] model = new float[16];
-        Pose rootFromDepthCamera = rootPose.inverse().compose(depth.getAnchor().getPose());
+        Pose rootFromDepthCamera = rootPose.inverse().compose(depth.getCameraPose());
         rootFromDepthCamera.toMatrix(model, 0);
 
         float[] xyz = new float[pointCount * 3];
@@ -55,7 +55,7 @@ public final class WorldPointCloudSnapshot {
             float c = points.get();
 
             // Android/ARCore matrices are OpenGL column-major. Convert the camera-local depth point
-            // into the same world coordinate system used by the saved camera poses.
+            // into the same root-anchor coordinate system used by saved camera poses.
             xyz[i * 3] = model[0] * x + model[4] * y + model[8] * z + model[12];
             xyz[i * 3 + 1] = model[1] * x + model[5] * y + model[9] * z + model[13];
             xyz[i * 3 + 2] = model[2] * x + model[6] * y + model[10] * z + model[14];

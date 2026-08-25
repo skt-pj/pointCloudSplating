@@ -2,7 +2,9 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'agent/**'
     paths-ignore:
       - 'dist/**'
   workflow_dispatch:
@@ -11,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-apk-main
+  group: build-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,8 +31,24 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
-        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android SDK and NDK packages
+        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Configure Android NDK environment
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> "$GITHUB_ENV"
+
+      - name: Prepare pinned VkSplat Android backend
+        run: |
+          chmod +x scripts/prepare-vksplat-android.sh
+          scripts/prepare-vksplat-android.sh
+
+      - name: Verify mobile trainer architecture
+        run: python3 scripts/verify-mobile-trainer.py
+
+      - name: Verify resumable 3DGS training
+        run: python3 scripts/verify-resumable-training.py
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -57,6 +75,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publish latest and versioned APK into repository
+        if: github.ref == 'refs/heads/main'
         run: |
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk dist/pointCloudSplating-debug.apk

@@ -5,15 +5,31 @@
     <uses-feature android:name="android.hardware.camera" android:required="true" />
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
     <uses-feature android:name="com.google.ar.core.depth" android:required="true" />
-    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
     <application
+        android:name=".PointCloudApp"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
-        android:label="Point Cloud Raw Depth"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar.Fullscreen">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="pointCloudSplating"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
+        <activity
+            android:name=".ModelProcessingActivity"
+            android:configChanges="orientation|screenSize"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+        <activity
+            android:name=".GaussianViewerActivity"
+            android:configChanges="orientation|screenSize"
+            android:exported="false" />
+        <activity
+            android:name=".LibraryActivity"
+            android:configChanges="orientation|screenSize"
+            android:exported="false" />
         <activity
             android:name=".ScannerActivity"
             android:configChanges="orientation|screenSize"

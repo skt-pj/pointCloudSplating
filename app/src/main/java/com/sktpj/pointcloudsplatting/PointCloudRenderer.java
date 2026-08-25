@@ -22,7 +22,9 @@ import android.opengl.GLES20;
 import android.opengl.Matrix;
 
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Iterator;
 
 /** Renders accumulated Raw Depth frames as RGB-colored 3D points over the live camera view. */
 public final class PointCloudRenderer {
@@ -35,6 +37,9 @@ public final class PointCloudRenderer {
     private static final int COLOR_BYTES_PER_POINT = Float.BYTES * COLOR_FLOATS_PER_POINT;
     private static final int INITIAL_BUFFER_POINTS = 1_000;
     private static final int MAX_FRAMES_STORED = 60;
+
+    private static final Object INSTANCES_LOCK = new Object();
+    private static final ArrayList<WeakReference<PointCloudRenderer>> INSTANCES = new ArrayList<>();
 
     private final ArrayList<DepthData> depthFrames = new ArrayList<>();
 
@@ -51,6 +56,44 @@ public final class PointCloudRenderer {
     private int confidenceThresholdUniform;
 
     private float minConfidence = 0.1f;
+
+    public PointCloudRenderer() {
+        synchronized (INSTANCES_LOCK) {
+            cleanupDeadInstancesLocked();
+            INSTANCES.add(new WeakReference<>(this));
+        }
+    }
+
+    /** Drops the in-memory rolling Raw Depth preview before the heavy native 3DGS allocation. */
+    public static int clearAllFramesForModelProcessing() {
+        int cleared = 0;
+        synchronized (INSTANCES_LOCK) {
+            Iterator<WeakReference<PointCloudRenderer>> iterator = INSTANCES.iterator();
+            while (iterator.hasNext()) {
+                PointCloudRenderer renderer = iterator.next().get();
+                if (renderer == null) {
+                    iterator.remove();
+                    continue;
+                }
+                cleared += renderer.clearFrames();
+            }
+        }
+        DiagnosticLog.i(TAG, "Cleared rolling depth preview frames=" + cleared + " before 3DGS");
+        return cleared;
+    }
+
+    private static void cleanupDeadInstancesLocked() {
+        Iterator<WeakReference<PointCloudRenderer>> iterator = INSTANCES.iterator();
+        while (iterator.hasNext()) {
+            if (iterator.next().get() == null) iterator.remove();
+        }
+    }
+
+    private synchronized int clearFrames() {
+        int count = depthFrames.size();
+        depthFrames.clear();
+        return count;
+    }
 
     public void createOnGlThread(Context context) throws IOException {
         int[] buffers = new int[2];
@@ -93,19 +136,18 @@ public final class PointCloudRenderer {
         ShaderUtil.checkGlError(TAG, "createOnGlThread");
     }
 
-    public void update(DepthData depth) {
+    public synchronized void update(DepthData depth) {
         depthFrames.add(depth);
         while (depthFrames.size() > MAX_FRAMES_STORED) {
-            depthFrames.get(0).getAnchor().detach();
             depthFrames.remove(0);
         }
     }
 
-    public int getStoredFrameCount() {
+    public synchronized int getStoredFrameCount() {
         return depthFrames.size();
     }
 
-    public void draw(float[] viewMatrix, float[] projectionMatrix) {
+    public synchronized void draw(float[] viewMatrix, float[] projectionMatrix) {
         if (depthFrames.isEmpty()) {
             return;
         }
@@ -114,8 +156,6 @@ public final class PointCloudRenderer {
         float[] modelView = new float[16];
         float[] modelViewProjection = new float[16];
 
-        // Do not apply the -1m demonstration offset used by the upstream point-cloud-only sample.
-        // With a live camera background, the true ARCore view matrix is required for registration.
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthMask(true);
         GLES20.glUseProgram(program);
