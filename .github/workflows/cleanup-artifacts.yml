@@ -1,33 +1,55 @@
-name: Delete Actions artifacts
+name: Prune old Actions artifacts
 
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/cleanup-artifacts.yml'
+  workflow_run:
+    workflows: ["Build APK"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: actions-artifact-prune
+  cancel-in-progress: false
+
 jobs:
   cleanup:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Delete every Actions artifact
+      - name: Keep only the latest artifact for each deliverable type
         uses: actions/github-script@v7
         with:
           script: |
-            const artifacts = await github.paginate(
-              github.rest.actions.listArtifactsForRepo,
-              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
-            );
-            for (const artifact of artifacts.filter((artifact) => !artifact.expired)) {
-              core.info(`Deleting ${artifact.name} (${artifact.id})`);
+            const { owner, repo } = context.repo;
+            const artifacts = (await github.paginate(github.rest.actions.listArtifactsForRepo, {
+              owner, repo, per_page: 100,
+            }))
+              .filter((artifact) => !artifact.expired)
+              .sort((a, b) =>
+                new Date(b.created_at) - new Date(a.created_at) || b.id - a.id
+              );
+            const kept = new Map();
+            for (const artifact of artifacts) {
+              const name = artifact.name.toLowerCase();
+              const type = /playables|youtube/.test(name) ? 'playables'
+                : /(^|[-_.])qa([-_.]|$)/.test(name) ? 'qa'
+                : /(^|[-_.])debug([-_.]|$)/.test(name) ? 'debug'
+                : /(^|[-_.])release([-_.]|$)/.test(name) ? 'release'
+                : 'other';
+              if (!kept.has(type)) {
+                kept.set(type, artifact.id);
+                core.info(`Keep ${type}: ${artifact.name} (${artifact.id})`);
+                continue;
+              }
+              core.info(`Delete ${type}: ${artifact.name} (${artifact.id})`);
               await github.rest.actions.deleteArtifact({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                artifact_id: artifact.id,
+                owner, repo, artifact_id: artifact.id,
               });
             }
